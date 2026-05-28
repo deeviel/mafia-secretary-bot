@@ -4,14 +4,12 @@
 When you enter the token via the application UI, it holds onto it **in memory**. However, every time we update code or the dev server restarts behind the scenes, that in-memory token is cleared. 
 
 To permanently store the Discord Token:
-- **In AI Studio (Current Environment):** Add it as a Secret by clicking the **Settings** (Gear icon) menu -> **Secrets** -> Add a secret called `DISCORD_TOKEN`.
+- **In the Local Environment:** Add it securely to your .env file or local environment secrets.
 - **In CloudPanel (Production):** You will add it as part of your `.env` configuration file detailed below.
 
 ## 📦 2. Preparing the App as a ZIP
-To prepare your app bundle for CloudPanel without using GitHub:
-1. First, in this AI Studio interface, click the **Settings** (Gear icon) menu at the top right.
-2. Select **Export to ZIP**.
-3. A `.zip` file will automatically download containing the entire source code of this schedule applet.
+To prepare your app bundle for CloudPanel:
+1. Export or compress your project folder into a `.zip` file containing the entire source code.
 
 ## 🌐 3. Do You Need a Domain?
 **Yes, it is highly recommended.** 

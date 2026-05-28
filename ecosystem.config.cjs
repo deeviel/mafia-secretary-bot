@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: "discord-scheduler-bot",
-      script: "start.cjs",
+      script: "dist/server.cjs",
       instances: 1,
       autorestart: true,
       watch: false,

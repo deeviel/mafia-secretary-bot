@@ -29,7 +29,10 @@ export const globalSettings = {
   warnings: [30, 15, 5, 1], // Notification minutes
   voiceCountdown: true,      // 10s countdown
   timezone: "Asia/Manila",
-  voiceLang: "en"
+  voiceLang: "en",
+  voiceStartText: "Clear comms and chat and get that win.",
+  warningAudioOffsetSec: 30,
+  warningAudioFileName: "godfather-theme-15s.mp3"
 };
 
 const PREFS_FILE = path.join(process.cwd(), '.discord-prefs.json');
@@ -67,7 +70,9 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+
+  // Security Middleware removed as basic auth is handled by CloudPanel.
 
   // API to get events
   app.get("/api/schedule", (req, res) => {
@@ -100,9 +105,61 @@ async function startServer() {
     if (typeof req.body.voiceLang === 'string') {
       globalSettings.voiceLang = req.body.voiceLang;
     }
+    if (typeof req.body.voiceStartText === 'string') {
+      globalSettings.voiceStartText = req.body.voiceStartText;
+    }
+    if (typeof req.body.warningAudioOffsetSec === 'number') {
+      globalSettings.warningAudioOffsetSec = req.body.warningAudioOffsetSec;
+    }
+    if (typeof req.body.warningAudioFileName === 'string') {
+      globalSettings.warningAudioFileName = req.body.warningAudioFileName;
+    }
     globalSettings.timezone = "Asia/Manila";
     savePrefs();
     res.json({ success: true, settings: globalSettings });
+  });
+
+  // API to list customized/uploaded warning audio files
+  app.get("/api/audio-files", (req, res) => {
+    try {
+      const files = fs.readdirSync(process.cwd());
+      const mp3Files = files.filter(f => f.endsWith('.mp3') && !f.startsWith('sound-cache-') && !f.startsWith('tts-temp-'));
+      res.json({ files: mp3Files });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // API to upload custom audio files
+  app.post("/api/upload-audio", (req, res) => {
+    const { name, data } = req.body;
+    if (!name || !data) {
+      return res.status(400).json({ error: "Missing name or data" });
+    }
+    
+    // Prevent directory traversal or malicious filenames
+    const cleanName = path.basename(name).replace(/[^a-zA-Z0-9.\-_]/g, "");
+    if (!cleanName.endsWith('.mp3')) {
+      return res.status(400).json({ error: "Only .mp3 files are allowed for security." });
+    }
+    
+    try {
+      // Decode base64
+      const buffer = Buffer.from(data, 'base64');
+      const targetPath = path.join(process.cwd(), cleanName);
+      
+      fs.writeFileSync(targetPath, buffer);
+      console.log(`Successfully uploaded custom audio file: ${cleanName} (${buffer.byteLength} bytes)`);
+      
+      // Auto upgrade settings to use this uploaded file
+      globalSettings.warningAudioFileName = cleanName;
+      savePrefs();
+      
+      res.json({ success: true, fileName: cleanName, message: "Audio uploaded successfully!" });
+    } catch (err: any) {
+      console.error("Audio upload error:", err);
+      res.status(500).json({ error: "Failed to save file: " + err.message });
+    }
   });
 
   // API to get discord voice channels

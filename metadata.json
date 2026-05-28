@@ -2,5 +2,5 @@
   "name": "Mafia Secretary",
   "description": "A recurring schedule timer inspired by Alder that includes a 10-second voice countdown before the interval completes.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

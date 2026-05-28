@@ -75,50 +75,8 @@ export async function ensureGodfatherThemeCached(): Promise<string> {
     }
   }
 
-  debugLog(`Downloading and caching Godfather theme from archive.org to: ${GODFATHER_CACHE_PATH}`);
-  try {
-    const tempPath = path.join(process.cwd(), 'godfather_temp.mp3');
-    
-    // Fallback: download directly using node's child_process and ffmpeg
-    return new Promise((resolve, reject) => {
-      try {
-        const curlProcess = spawn('curl', ['-s', '-L', 'https://archive.org/download/godfather_3310/godfather_3310.mp3', '-o', tempPath]);
-        curlProcess.on('exit', (code) => {
-          if (code !== 0) {
-            reject(new Error(`curl exited with code ${code}`));
-            return;
-          }
-          const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
-          const ffmpegProcess = spawn(ffmpegPath, [
-            '-y',
-            '-i', tempPath,
-            '-ss', '00:00:00',
-            '-t', '15',
-            '-acodec', 'libmp3lame',
-            '-ab', '128k',
-            GODFATHER_CACHE_PATH
-          ]);
-          ffmpegProcess.on('exit', (ffmpegCode) => {
-             // clean up temp
-             if(fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-             
-             if (ffmpegCode === 0) {
-                debugLog(`Successfully cached Godfather theme 15s audio!`);
-                resolve(GODFATHER_CACHE_PATH);
-             } else {
-                debugLog(`FFMPEG exited with error code: ${ffmpegCode}`);
-                reject(new Error(`ffmpeg exited with code ${ffmpegCode}`));
-             }
-          });
-        });
-      } catch (err: any) {
-        reject(err);
-      }
-    });
-  } catch (e: any) {
-    debugLog(`Error initiating Godfather download: ${e.message}`);
-    throw e;
-  }
+  debugLog(`Godfather theme not found at: ${GODFATHER_CACHE_PATH}`);
+  throw new Error('Godfather theme 15s audio is missing from the directory.');
 }
 
 const cacheList = [
@@ -219,9 +177,19 @@ export function isDiscordConnected() {
   return !!(client && client.isReady());
 }
 
+export interface DiscordBotSettings {
+  warnings: number[];
+  voiceCountdown: boolean;
+  timezone?: string;
+  voiceLang?: string;
+  voiceStartText?: string;
+  warningAudioOffsetSec?: number;
+  warningAudioFileName?: string;
+}
+
 export async function initDiscordBot(
   globalSchedule: { events: ScheduledEvent[] },
-  globalSettings: { warnings: number[], voiceCountdown: boolean, voiceLang?: string },
+  globalSettings: DiscordBotSettings,
   token?: string
 ): Promise<void> {
   const currentToken = (token || process.env.DISCORD_TOKEN || '').trim();
@@ -494,7 +462,7 @@ let scheduleInterval: any;
 // Evaluate events every second
 function startScheduleLoop(
   globalSchedule: { events: ScheduledEvent[] },
-  globalSettings: { warnings: number[], voiceCountdown: boolean, timezone?: string, voiceLang?: string }
+  globalSettings: DiscordBotSettings
 ) {
   if (scheduleInterval) clearInterval(scheduleInterval);
   
@@ -592,16 +560,27 @@ function startScheduleLoop(
       }
     });
 
-    // Handle standard countdown checks (Godfather intro at T-30, countdown details, and clear comms message at T-0)
+    // Handle standard countdown checks (custom warning audio intro, countdown details, and clear comms message at T-0)
     if (globalSettings.voiceCountdown) {
-      if (secsLeft === 30) {
-        const milestoneKey = 'youtube-intro-30';
+      const warningOffset = typeof globalSettings.warningAudioOffsetSec === 'number' ? globalSettings.warningAudioOffsetSec : 30;
+      if (secsLeft === warningOffset) {
+        const milestoneKey = `warning-audio-${warningOffset}`;
         if (!milestones.has(milestoneKey)) {
           milestones.add(milestoneKey);
-          if (fs.existsSync(GODFATHER_CACHE_PATH)) {
-            playLocalFileInChannels(GODFATHER_CACHE_PATH, targetChannels);
+          const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
+          const customAudioPath = path.join(process.cwd(), customFileName);
+          if (fs.existsSync(customAudioPath)) {
+            playLocalFileInChannels(customAudioPath, targetChannels);
+            debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name}`);
+          } else {
+            const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
+            if (fs.existsSync(fallbackPath)) {
+              playLocalFileInChannels(fallbackPath, targetChannels);
+              debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name}`);
+            } else {
+              debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);
+            }
           }
-          debugLog(`Played audio intro milestone: ${milestoneKey} for ${nextEvent.name}`);
         }
       } else if (secsLeft <= 10 && secsLeft >= 1) {
         const milestoneKey = `countdown-${secsLeft}`;
@@ -619,14 +598,18 @@ function startScheduleLoop(
         const milestoneKey = 'countdown-0';
         if (!milestones.has(milestoneKey)) {
           milestones.add(milestoneKey);
+          
+          const customStartText = globalSettings.voiceStartText || "Clear comms and chat and get that win.";
+          const isDefaultText = customStartText.trim().toLowerCase().startsWith("clear comms and chat");
           const clearCommsFile = cachedSpeechPaths.get('clear-comms');
-          if (clearCommsFile && fs.existsSync(clearCommsFile)) {
+          
+          if (isDefaultText && clearCommsFile && fs.existsSync(clearCommsFile)) {
             playLocalFileInChannels(clearCommsFile, targetChannels);
             setTimeout(() => {
               playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, targetChannels, globalSettings.voiceLang);
             }, 2600);
           } else {
-            playAudioInVoiceChannels(`Clear comms and chat and get that win. ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang);
+            playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang);
           }
           debugLog(`Spoke starting-now milestone: ${milestoneKey} for ${nextEvent.name}`);
         }

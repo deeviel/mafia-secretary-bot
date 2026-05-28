@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Play, Pause, History, CheckCircle2, Plus, Trash2, CalendarClock, 
   Volume2, Save, Pencil, X, Settings, Clock, Shield, Bot, AlertTriangle, 
-  ChevronRight, Activity, Radio, VolumeX, Flame, Terminal, HelpCircle 
+  ChevronRight, Activity, Radio, VolumeX, Flame, Terminal, HelpCircle,
+  Upload, Music 
 } from 'lucide-react';
 import { useSchedule, ScheduledEvent } from './hooks/useSchedule';
 import { CircularProgress } from './components/CircularProgress';
@@ -17,6 +18,13 @@ export default function App() {
   const [warnings, setWarnings] = useState<number[]>([30, 15, 5, 1]);
   const [logs, setLogs] = useState<{ id: string; time: string; msg: string }[]>([]);
   const [timezone, setTimezone] = useState<string>('Asia/Manila');
+  
+  // Custom audio & announcement settings
+  const [voiceStartText, setVoiceStartText] = useState('Clear comms and chat and get that win.');
+  const [warningAudioOffsetSec, setWarningAudioOffsetSec] = useState(30);
+  const [warningAudioFileName, setWarningAudioFileName] = useState('godfather-theme-15s.mp3');
+  const [availableAudioFiles, setAvailableAudioFiles] = useState<string[]>(['godfather-theme-15s.mp3']);
+  const [isUploading, setIsUploading] = useState(false);
   
   // Voice settings
   const [voices, setVoices] = useState<VoiceOption[]>([]);
@@ -114,6 +122,17 @@ export default function App() {
        .catch(err => console.error("Failed to load discord channels", err));
   };
 
+  const fetchAudioFiles = () => {
+    fetch('/api/audio-files')
+      .then(res => res.json())
+      .then(data => {
+        if (data && Array.isArray(data.files)) {
+          setAvailableAudioFiles(data.files);
+        }
+      })
+      .catch(err => console.error("Failed to load audio files:", err));
+  };
+
   // Load Initial Data from Backend
   useEffect(() => {
     fetch('/api/schedule')
@@ -129,6 +148,7 @@ export default function App() {
       .catch(err => console.error("Failed to load schedule", err));
       
     fetchDiscordStatus();
+    fetchAudioFiles();
     // Poll status every 5 seconds just in case it connects in background
     const intv = setInterval(fetchDiscordStatus, 5000);
 
@@ -142,6 +162,9 @@ export default function App() {
         if (!data) return;
         if (data.warnings) setWarnings(data.warnings);
         if (typeof data.voiceCountdown === 'boolean') setVoiceCountdown(data.voiceCountdown);
+        if (typeof data.voiceStartText === 'string') setVoiceStartText(data.voiceStartText);
+        if (typeof data.warningAudioOffsetSec === 'number') setWarningAudioOffsetSec(data.warningAudioOffsetSec);
+        if (typeof data.warningAudioFileName === 'string') setWarningAudioFileName(data.warningAudioFileName);
         setTimezone("Asia/Manila");
         // Ensure backend setting is set to Asia/Manila too
         fetch('/api/settings', {
@@ -175,14 +198,36 @@ export default function App() {
     }).catch(console.error);
   };
 
-  const syncSettings = (updatedWarnings: number[], updatedVoiceCountdown: boolean, newVoiceLang?: string) => {
+  const syncSettings = (
+    updatedWarnings: number[], 
+    updatedVoiceCountdown: boolean, 
+    newVoiceLang?: string,
+    newVoiceStartText?: string,
+    newWarningOffset?: number,
+    newWarningFile?: string
+  ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
+    if (newVoiceStartText !== undefined) setVoiceStartText(newVoiceStartText);
+    if (newWarningOffset !== undefined) setWarningAudioOffsetSec(newWarningOffset);
+    if (newWarningFile !== undefined) setWarningAudioFileName(newWarningFile);
+
     const lang = newVoiceLang || voices.find(v => v.uri === selectedVoice)?.lang || 'en';
+    
+    const postBody = {
+      warnings: updatedWarnings,
+      voiceCountdown: updatedVoiceCountdown,
+      timezone,
+      voiceLang: lang,
+      voiceStartText: newVoiceStartText !== undefined ? newVoiceStartText : voiceStartText,
+      warningAudioOffsetSec: newWarningOffset !== undefined ? newWarningOffset : warningAudioOffsetSec,
+      warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName
+    };
+
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ warnings: updatedWarnings, voiceCountdown: updatedVoiceCountdown, timezone, voiceLang: lang })
+      body: JSON.stringify(postBody)
     }).catch(console.error);
   };
 
@@ -221,6 +266,44 @@ export default function App() {
       showToast(`Failed to connect: ${err.message}. If the server is restarting, please wait a moment.`, 'error');
     })
     .finally(() => setIsDiscordConnecting(false));
+  };
+
+  const handleAudioUpload = (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.mp3')) {
+      showToast("Only MP3 audio files are permitted.", "error");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      showToast("File is too large. Max size is 20MB.", "error");
+      return;
+    }
+
+    setIsUploading(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64Data = (reader.result as string).split(',')[1];
+      fetch('/api/upload-audio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: file.name, data: base64Data })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          showToast(`Successfully uploaded audio briefings code: ${data.fileName}`, "success");
+          setWarningAudioFileName(data.fileName);
+          fetchAudioFiles();
+        } else {
+          showToast(data.error || "Failed to upload audio briefing", "error");
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        showToast("Error upload transmission: check connections.", "error");
+      })
+      .finally(() => setIsUploading(false));
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleEventTrigger = (event: ScheduledEvent) => {
@@ -489,6 +572,155 @@ export default function App() {
                 </form>
               </div>
             )}
+          </div>
+
+          {/* Broadcast Briefing Settings Card */}
+          <div className="bg-[#111522] border border-rose-950/15 rounded-3xl p-6 shadow-xl ring-1 ring-white/5 relative overflow-hidden mt-6">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-rose-500/5 rounded-full blur-2xl pointer-events-none" />
+            
+            <div className="flex items-center gap-2 mb-4">
+              <Volume2 className="w-5 h-5 text-rose-500" />
+              <h3 className="text-xs font-bold font-mono tracking-[0.15em] uppercase text-white">Broadcast Audio Settings</h3>
+            </div>
+            
+            <div className="space-y-4 text-xs font-mono">
+              {/* Feature 1: Custom Event Start Speech Text */}
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold block mb-1.5">
+                  Event Start Announcement Text
+                </label>
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    value={voiceStartText} 
+                    onChange={e => setVoiceStartText(e.target.value)} 
+                    placeholder="Clear comms and chat and get that win." 
+                    className="bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-4 py-3 flex-1 outline-none focus:border-rose-500/45 transition-all font-mono placeholder:text-slate-600"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      syncSettings(warnings, voiceCountdown, undefined, voiceStartText, warningAudioOffsetSec, warningAudioFileName);
+                      showToast("Speech announcement updated successfully", "success");
+                    }}
+                    className="bg-rose-950/40 hover:bg-rose-900/40 border border-rose-900/30 text-rose-400 font-semibold px-4 rounded-xl transition-all font-mono hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    Save
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Generated as real-time voice speech when countdown is complete (T-0s).
+                </p>
+              </div>
+
+              {/* Feature 2: Warning Countdown Offset */}
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold block mb-1.5">
+                  Warning Audio Trigger Offset
+                </label>
+                <div className="flex gap-2 items-center">
+                  <select
+                    value={warningAudioOffsetSec}
+                    onChange={e => {
+                      const val = parseInt(e.target.value);
+                      setWarningAudioOffsetSec(val);
+                      syncSettings(warnings, voiceCountdown, undefined, voiceStartText, val, warningAudioFileName);
+                      showToast(`Warning sound set to trigger at T-${val}s`, "success");
+                    }}
+                    className="bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-3 flex-1 outline-none focus:border-rose-500/40 transition-colors cursor-pointer"
+                  >
+                    <option value="60">60 seconds before event (T-60s)</option>
+                    <option value="45">45 seconds before event (T-45s)</option>
+                    <option value="30">30 seconds before event (T-30s)</option>
+                    <option value="20">20 seconds before event (T-20s)</option>
+                    <option value="15">15 seconds before event (T-15s)</option>
+                    <option value="10">10 seconds before event (T-10s)</option>
+                    <option value="5">5 seconds before event (T-5s)</option>
+                  </select>
+                  
+                  <div className="flex items-center gap-1.5 bg-[#07090F] px-3 py-3 border border-slate-800 rounded-xl leading-none">
+                    <input
+                      type="number"
+                      min="1"
+                      max="300"
+                      value={warningAudioOffsetSec}
+                      onChange={e => {
+                        const val = parseInt(e.target.value) || 30;
+                        setWarningAudioOffsetSec(val);
+                        syncSettings(warnings, voiceCountdown, undefined, voiceStartText, val, warningAudioFileName);
+                      }}
+                      className="bg-transparent text-center border-none text-rose-400 text-xs w-10 outline-none p-0 font-mono"
+                    />
+                    <span className="text-slate-500 text-[10px]">secs</span>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  How many seconds before event start the warning soundtrack executes.
+                </p>
+              </div>
+
+              {/* Feature 3: Warning Audio File Manage/Upload */}
+              <div className="border-t border-rose-950/10 pt-4">
+                <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold block mb-1.5">
+                  Select Custom Warning Sound
+                </label>
+                <div className="flex flex-col gap-2">
+                  {availableAudioFiles.length > 0 ? (
+                    <select
+                      value={warningAudioFileName}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setWarningAudioFileName(val);
+                        syncSettings(warnings, voiceCountdown, undefined, voiceStartText, warningAudioOffsetSec, val);
+                        showToast(`Warning sound updated to: ${val}`, "success");
+                      }}
+                      className="bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-3 outline-none focus:border-rose-500/40 transition-colors cursor-pointer font-mono"
+                    >
+                      {availableAudioFiles.map(file => (
+                        <option key={file} value={file}>
+                          📁 {file}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-[10px] text-slate-500 italic">No custom audio files uploaded yet.</p>
+                  )}
+
+                  {/* Drag & Drop Area */}
+                  <div 
+                    onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-rose-500/5', 'border-rose-500/30'); }}
+                    onDragLeave={e => { e.preventDefault(); e.currentTarget.classList.remove('bg-rose-500/5', 'border-rose-500/30'); }}
+                    onDrop={e => {
+                      e.preventDefault();
+                      e.currentTarget.classList.remove('bg-rose-500/5', 'border-rose-500/30');
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        handleAudioUpload(e.dataTransfer.files[0]);
+                      }
+                    }}
+                    className="border border-dashed border-slate-800 rounded-2xl p-4 text-center cursor-pointer hover:bg-slate-900/40 hover:border-rose-500/10 transition-all flex flex-col items-center justify-center gap-1.5 group relative"
+                  >
+                    <input 
+                      type="file" 
+                      accept=".mp3"
+                      disabled={isUploading}
+                      onChange={e => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleAudioUpload(e.target.files[0]);
+                        }
+                      }}
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                    />
+                    <Upload className={`w-5 h-5 ${isUploading ? 'text-rose-400 animate-bounce' : 'text-slate-600 group-hover:text-rose-400'} transition-colors`} />
+                    <span className="text-[10px] text-slate-400 block font-semibold uppercase tracking-wider">
+                      {isUploading ? 'Uploading Briefings...' : 'Drag & Drop MP3 File'}
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">
+                      or click to upload custom warning soundtrack (Max 20MB)
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
         </div>
