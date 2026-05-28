@@ -19,7 +19,7 @@ const format12Hour = (timeStr: string) => {
   if (isNaN(hour)) return timeStr;
   const ampm = hour >= 12 ? 'PM' : 'AM';
   const displayHour = hour % 12 === 0 ? 12 : hour % 12;
-  return `${displayHour}:${displayHour < 10 ? '0' : ''}${displayHour}:${minStr} ${ampm}`.replace(`${displayHour}:${displayHour}`, `${displayHour}`);
+  return `${displayHour}:${minStr} ${ampm}`;
 };
 
 export default function App() {
