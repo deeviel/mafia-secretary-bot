@@ -9,10 +9,20 @@ import { ScheduledEvent } from "./src/hooks/useSchedule.js";
 
 dotenv.config();
 
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', (err: any) => {
+  const errStr = err ? (err.message || String(err)) : '';
+  if (errStr.includes('Cannot perform IP discovery') || errStr.includes('socket closed')) {
+    console.log(`[Voice Connection Diagnostics] Handled anticipated Voice Connection uncaught exception cleanly (UDP IP discovery restricted inside Google Cloud Run/Sandbox environment).`);
+    return;
+  }
   console.error('UNCAUGHT EXCEPTION:', err);
 });
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason: any, promise) => {
+  const reasonStr = reason ? (reason.message || String(reason)) : '';
+  if (reasonStr.includes('Cannot perform IP discovery') || reasonStr.includes('socket closed')) {
+    console.log(`[Voice Connection Diagnostics] Handled anticipated Voice Connection unhandled rejection cleanly (UDP IP discovery restricted inside Google Cloud Run/Sandbox environment).`);
+    return;
+  }
   console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason);
 });
 
