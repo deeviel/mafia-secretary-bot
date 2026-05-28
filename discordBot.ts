@@ -216,7 +216,54 @@ export async function initDiscordBot(
         debugLog(`Pre-caching error (non-fatal): ${err.message}`);
       });
       startScheduleLoop(globalSchedule, globalSettings);
+
+      // Register /ss global slash commands
+      try {
+        client?.application?.commands.create({
+          name: 'ss',
+          description: 'Speak a message aloud into your voice channel chat/channel',
+          options: [
+            {
+              name: 'text',
+              type: 3, // String type
+              description: 'The text for Mafia Secretary to speak',
+              required: true
+            }
+          ]
+        }).then(() => {
+          debugLog(`Successfully registered global slash command '/ss'`);
+        }).catch(err => {
+          debugLog(`Failed during global slash command '/ss' registration: ${err.message}`);
+        });
+      } catch (err: any) {
+        debugLog(`Error queuing slash command register: ${err.message}`);
+      }
+
       resolve();
+    });
+
+    client!.on('interactionCreate', async (interaction) => {
+      try {
+        if (!interaction.isChatInputCommand()) return;
+        if (interaction.commandName === 'ss') {
+          const textToSpeak = interaction.options.getString('text');
+          if (!textToSpeak) {
+            await interaction.reply({ content: "Please supply the text to speak.", ephemeral: true });
+            return;
+          }
+          const member = interaction.guild?.members.cache.get(interaction.user.id);
+          const voiceChannel = member?.voice?.channel;
+          if (voiceChannel) {
+            await interaction.deferReply();
+            await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
+            await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` });
+          } else {
+            await interaction.reply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.`, ephemeral: true });
+          }
+        }
+      } catch (err: any) {
+        debugLog(`Error processing slash interaction: ${err.message}`);
+      }
     });
 
     client!.on('error', (err) => {

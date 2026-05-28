@@ -12,6 +12,16 @@ import { speech, VoiceOption } from './lib/speech';
 
 let tzList: string[] = ['Asia/Manila', 'UTC'];
 
+const format12Hour = (timeStr: string) => {
+  if (!timeStr) return '';
+  const [hourStr, minStr] = timeStr.split(':');
+  const hour = parseInt(hourStr, 10);
+  if (isNaN(hour)) return timeStr;
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  const displayHour = hour % 12 === 0 ? 12 : hour % 12;
+  return `${displayHour}:${displayHour < 10 ? '0' : ''}${displayHour}:${minStr} ${ampm}`.replace(`${displayHour}:${displayHour}`, `${displayHour}`);
+};
+
 export default function App() {
   const [events, setEvents] = useState<ScheduledEvent[]>([]);
   const [voiceCountdown, setVoiceCountdown] = useState(true);
@@ -42,7 +52,7 @@ export default function App() {
           hour: '2-digit',
           minute: '2-digit',
           second: '2-digit',
-          hour12: false
+          hour12: true
         });
         const dateFormatter = new Intl.DateTimeFormat('en-US', {
           timeZone: 'Asia/Manila',
@@ -182,8 +192,14 @@ export default function App() {
     speech.onVoicesLoaded(() => {
       const v = speech.getVoices();
       setVoices(v);
-      const current = speech.getCurrentVoiceUri();
-      if (current) setSelectedVoice(current);
+      const saved = localStorage.getItem('selectedVoiceUri');
+      if (saved) {
+        speech.setVoiceByUri(saved);
+        setSelectedVoice(saved);
+      } else {
+        const current = speech.getCurrentVoiceUri();
+        if (current) setSelectedVoice(current);
+      }
     });
     
     return () => clearInterval(intv);
@@ -235,6 +251,7 @@ export default function App() {
     const uri = e.target.value;
     setSelectedVoice(uri);
     speech.setVoiceByUri(uri);
+    localStorage.setItem('selectedVoiceUri', uri);
     speech.speak("Voice updated successfully.", 1.0, true);
     const v = voices.find(v => v.uri === uri);
     if (v) syncSettings(warnings, voiceCountdown, v.lang);
@@ -405,9 +422,7 @@ export default function App() {
               MAFIA SECRETARY
             </h1>
           </div>
-          <p className="text-[10px] uppercase tracking-widest text-slate-500 font-mono mt-1.5 flex items-center gap-1.5">
-            <Terminal className="w-3.5 h-3.5 text-rose-500/80" /> Operational Administrative Dispatch Console
-          </p>
+          {/* Subtitle removed per user request */}
         </div>
 
         {/* Live Manila Time Status */}
@@ -472,7 +487,7 @@ export default function App() {
                 <>
                   <span className="text-rose-400 font-mono tracking-wide">{nextEvent.name}</span>
                   <span className="text-xs font-mono font-medium text-slate-400 mt-2 uppercase flex items-center justify-center gap-1.5">
-                    Trigger operations at <span className="text-rose-400 bg-rose-950/30 font-semibold px-2 py-0.5 rounded border border-rose-900/20">{nextEvent.time}</span> Manila
+                    Trigger operations at <span className="text-rose-400 bg-rose-950/30 font-semibold px-2 py-0.5 rounded border border-rose-900/20">{format12Hour(nextEvent.time)}</span> Manila
                   </span>
                 </>
               ) : (
@@ -810,7 +825,7 @@ export default function App() {
                     <div className={`transition-opacity duration-300 ${ev.enabled ? 'opacity-100' : 'opacity-40'}`}>
                       <p className="text-sm font-bold text-white font-mono tracking-wide">{ev.name}</p>
                       <p className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1.5 font-mono">
-                        <span className="text-rose-400 font-semibold">{ev.time}</span>
+                        <span className="text-rose-400 font-semibold">{format12Hour(ev.time)}</span>
                         {ev.days && ev.days.length > 0 && (
                           <>
                             <span>•</span>
