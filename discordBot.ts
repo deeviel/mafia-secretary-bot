@@ -46,6 +46,58 @@ if (ffmpeg) {
 }
 
 let client: Client | null = null;
+
+function resolveMentions(text: string, guild: any): string {
+  if (!text) return text;
+  let resolved = text;
+
+  // Resolve user mentions: <@123456789> or <@!123456789>
+  const userRegex = /<@!?(\d+)>/g;
+  resolved = resolved.replace(userRegex, (match, userId) => {
+    if (guild) {
+      const member = guild.members.cache.get(userId);
+      if (member) {
+        return member.displayName || member.user.username;
+      }
+    }
+    const user = client?.users.cache.get(userId);
+    if (user) {
+      return user.displayName || user.username;
+    }
+    return "someone";
+  });
+
+  // Resolve role mentions: <@&123456789>
+  const roleRegex = /<@&(\d+)>/g;
+  resolved = resolved.replace(roleRegex, (match, roleId) => {
+    if (guild) {
+      const role = guild.roles.cache.get(roleId);
+      if (role) {
+        return role.name;
+      }
+    }
+    return "a role";
+  });
+
+  // Resolve channel mentions: <#123456789>
+  const channelRegex = /<#(\d+)>/g;
+  resolved = resolved.replace(channelRegex, (match, channelId) => {
+    if (guild) {
+      const channel = guild.channels.cache.get(channelId);
+      if (channel) {
+        return channel.name;
+      }
+    }
+    const globalChannel = client?.channels.cache.get(channelId);
+    if (globalChannel && 'name' in globalChannel) {
+      return (globalChannel as any).name;
+    }
+    return "a channel";
+  });
+
+  return resolved;
+}
+
 const globalVoicePlayer = createAudioPlayer();
 
 globalVoicePlayer.on('error', error => {
@@ -208,144 +260,177 @@ export async function initDiscordBot(
     client.destroy();
   }
 
-  client = new Client({
-    intents: [
+  const tryLoginWithIntents = (intentsList: any[]): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      client = new Client({
+        intents: intentsList
+      });
+
+      client.on('ready', () => {
+        debugLog(`Discord bot logged in and READY as: ${client?.user?.tag}`);
+        preCacheSpeechSounds().catch(err => {
+          debugLog(`Pre-caching error (non-fatal): ${err.message}`);
+        });
+        startScheduleLoop(globalSchedule, globalSettings);
+
+        // Register /ss global slash commands and clear redundant guild commands to prevent duplicates
+        try {
+          client?.application?.commands.create({
+            name: 'ss',
+            description: 'Speak a message aloud into your voice channel chat/channel',
+            options: [
+              {
+                name: 'text',
+                type: 3, // String type
+                description: 'The text for Mafia Secretary to speak',
+                required: true
+              }
+            ]
+          }).then(() => {
+            debugLog(`Successfully registered global slash command '/ss'`);
+          }).catch(err => {
+            debugLog(`Failed during global slash command '/ss' registration: ${err.message}`);
+          });
+
+          // Clear guild-level /ss commands so they don't double-up with the global command
+          client?.guilds.cache.forEach(guild => {
+            guild.commands.set([]).then(() => {
+              debugLog(`Cleared custom guild-level slash commands for: "${guild.name}" to prevent duplication.`);
+            }).catch(err => {
+              debugLog(`Guild-level command resetting bypassed or failed for "${guild.name}": ${err.message}`);
+            });
+          });
+
+        } catch (err: any) {
+          debugLog(`Error cleaning up & registering slash commands: ${err.message}`);
+        }
+
+        resolve();
+      });
+
+      client.on('interactionCreate', async (interaction) => {
+        try {
+          if (!interaction.isChatInputCommand()) return;
+          if (interaction.commandName === 'ss') {
+            // SECURE IMMEDIATE DEFERRAL to completely prevent 3-second Discord expiration ("Unknown interaction")
+            await interaction.deferReply().catch(err => {
+              debugLog(`Immediate deferReply failed: ${err.message}`);
+            });
+
+            const textToSpeak = interaction.options.getString('text');
+            if (!textToSpeak) {
+              await interaction.editReply({ content: "❌ Please supply the text to speak." }).catch(() => {});
+              return;
+            }
+
+            const member = interaction.guild?.members.cache.get(interaction.user.id);
+            const voiceChannel = member?.voice?.channel;
+            if (voiceChannel) {
+              try {
+                debugLog(`Interactions command (/ss) triggered by ${interaction.user.tag} for: "${textToSpeak}"`);
+                const cleanSpeech = resolveMentions(textToSpeak, interaction.guild);
+                await playAudioInVoiceChannels(cleanSpeech, [voiceChannel.id], globalSettings.voiceLang || 'en');
+                await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
+              } catch (playErr: any) {
+                debugLog(`Failed to speak via interactions: ${playErr.message}`);
+                await interaction.editReply({ content: `❌ Stalled voice stream: ${playErr.message}` }).catch(() => {});
+              }
+            } else {
+              await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
+            }
+          }
+        } catch (err: any) {
+          debugLog(`Error processing slash interaction: ${err.message}`);
+        }
+      });
+
+      // Only mount the messageCreate handler if we have the messages permission
+      if (intentsList.includes(GatewayIntentBits.GuildMessages)) {
+        client.on('messageCreate', async (message) => {
+          try {
+            if (!message.guild || message.author.bot) return;
+
+            const content = message.content.trim();
+            let textToSpeak = '';
+            
+            // Match clean /ss as a fast alternate, !ss, .ss, or ss prefix-less commands
+            const lower = content.toLowerCase();
+            if (lower.startsWith('ss ')) {
+              textToSpeak = content.substring(3).trim();
+            } else if (lower.startsWith('!ss ')) {
+              textToSpeak = content.substring(4).trim();
+            } else if (lower.startsWith('.ss ')) {
+              textToSpeak = content.substring(4).trim();
+            } else if (lower.startsWith('/ss ')) {
+              textToSpeak = content.substring(4).trim();
+            }
+
+            if (!textToSpeak) return;
+
+            // Get guild member
+            const member = message.guild.members.cache.get(message.author.id) || await message.guild.members.fetch(message.author.id).catch(() => null);
+            const voiceChannel = member?.voice?.channel;
+            if (voiceChannel) {
+              const chName = 'name' in message.channel ? (message.channel as any).name : 'unknown-channel';
+              debugLog(`Plain-text text transmission triggered by ${message.author.tag} in channel ${chName}: "${textToSpeak}"`);
+              
+              // Instantly react to the Discord message for beautiful, fast non-blocking feedback!
+              message.react('🗣️').catch(() => {});
+              
+              const cleanSpeech = resolveMentions(textToSpeak, message.guild);
+              await playAudioInVoiceChannels(cleanSpeech, [voiceChannel.id], globalSettings.voiceLang || 'en');
+            } else {
+              message.react('❌').catch(() => {});
+            }
+          } catch (err: any) {
+            debugLog(`Error processing text message listener: ${err.message}`);
+          }
+        });
+      }
+
+      client.on('error', (err) => {
+        debugLog(`Discord client error event: ${err.message}`);
+      });
+
+      client.login(currentToken).catch(err => {
+        reject(err);
+      });
+    });
+  };
+
+  try {
+    debugLog("Attempting connection with direct text-reading intent (Privileged MessageContent)");
+    await tryLoginWithIntents([
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-    ]
-  });
-
-  return new Promise((resolve, reject) => {
-    client!.on('ready', () => {
-      debugLog(`Discord bot logged in and READY as: ${client?.user?.tag}`);
-      preCacheSpeechSounds().catch(err => {
-        debugLog(`Pre-caching error (non-fatal): ${err.message}`);
-      });
-      startScheduleLoop(globalSchedule, globalSettings);
-
-      // Register /ss global slash commands and clear redundant guild commands to prevent duplicates
-      try {
-        client?.application?.commands.create({
-          name: 'ss',
-          description: 'Speak a message aloud into your voice channel chat/channel',
-          options: [
-            {
-              name: 'text',
-              type: 3, // String type
-              description: 'The text for Mafia Secretary to speak',
-              required: true
-            }
-          ]
-        }).then(() => {
-          debugLog(`Successfully registered global slash command '/ss'`);
-        }).catch(err => {
-          debugLog(`Failed during global slash command '/ss' registration: ${err.message}`);
-        });
-
-        // Clear guild-level /ss commands so they don't double-up with the global command
-        client?.guilds.cache.forEach(guild => {
-          guild.commands.set([]).then(() => {
-            debugLog(`Cleared custom guild-level slash commands for: "${guild.name}" to prevent duplication.`);
-          }).catch(err => {
-            debugLog(`Guild-level command resetting bypassed or failed for "${guild.name}": ${err.message}`);
-          });
-        });
-
-      } catch (err: any) {
-        debugLog(`Error cleaning up & registering slash commands: ${err.message}`);
+      GatewayIntentBits.MessageContent
+    ]);
+  } catch (err: any) {
+    const errMsg = (err.message || '').toLowerCase();
+    if (errMsg.includes('disallowed') || errMsg.includes('privileged') || err.code === 'DisallowedIntents') {
+      debugLog("⚠️ NOTICE: The bot prompt listener is currently using a graceful fallback state!");
+      debugLog("⚠️ Problem detected: 'Message Content Intent' is not enabled in your Discord Developer Bot Portal.");
+      debugLog("⚠️ Outcome: Regular chat message triggers (like typing 'ss hello' or '!ss hello') are bypassed. Slash command '/ss hello' remains fully functional.");
+      debugLog("⚠️ To fix: Go to https://discord.com/developers/applications, select your bot, click the 'Bot' tab, scroll down to 'Privileged Gateway Intents', turn on 'Message Content Intent', and click 'Save Changes'.");
+      debugLog("🔄 Booting bot on fallback intents mode right now...");
+      
+      if (client) {
+        try { client.destroy(); } catch (e) {}
       }
 
-      resolve();
-    });
-
-    client!.on('interactionCreate', async (interaction) => {
-      try {
-        if (!interaction.isChatInputCommand()) return;
-        if (interaction.commandName === 'ss') {
-          // SECURE IMMEDIATE DEFERRAL to completely prevent 3-second Discord expiration ("Unknown interaction")
-          await interaction.deferReply().catch(err => {
-            debugLog(`Immediate deferReply failed: ${err.message}`);
-          });
-
-          const textToSpeak = interaction.options.getString('text');
-          if (!textToSpeak) {
-            await interaction.editReply({ content: "❌ Please supply the text to speak." }).catch(() => {});
-            return;
-          }
-
-          const member = interaction.guild?.members.cache.get(interaction.user.id);
-          const voiceChannel = member?.voice?.channel;
-          if (voiceChannel) {
-            try {
-              debugLog(`Interactions command (/ss) triggered by ${interaction.user.tag} for: "${textToSpeak}"`);
-              await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
-              await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
-            } catch (playErr: any) {
-              debugLog(`Failed to speak via interactions: ${playErr.message}`);
-              await interaction.editReply({ content: `❌ Stalled voice stream: ${playErr.message}` }).catch(() => {});
-            }
-          } else {
-            await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
-          }
-        }
-      } catch (err: any) {
-        debugLog(`Error processing slash interaction: ${err.message}`);
+      await tryLoginWithIntents([
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates
+      ]);
+    } else {
+      if (client) {
+        try { client.destroy(); } catch (e) {}
       }
-    });
-
-    client!.on('messageCreate', async (message) => {
-      try {
-        if (!message.guild || message.author.bot) return;
-
-        const content = message.content.trim();
-        let textToSpeak = '';
-        
-        // Match clean /ss as a fast alternate, !ss, .ss, or ss prefix-less commands
-        const lower = content.toLowerCase();
-        if (lower.startsWith('ss ')) {
-          textToSpeak = content.substring(3).trim();
-        } else if (lower.startsWith('!ss ')) {
-          textToSpeak = content.substring(4).trim();
-        } else if (lower.startsWith('.ss ')) {
-          textToSpeak = content.substring(4).trim();
-        } else if (lower.startsWith('/ss ')) {
-          textToSpeak = content.substring(4).trim();
-        }
-
-        if (!textToSpeak) return;
-
-        // Get guild member
-        const member = message.guild.members.cache.get(message.author.id) || await message.guild.members.fetch(message.author.id).catch(() => null);
-        const voiceChannel = member?.voice?.channel;
-        if (voiceChannel) {
-          const chName = 'name' in message.channel ? (message.channel as any).name : 'unknown-channel';
-          debugLog(`Plain-text text transmission triggered by ${message.author.tag} in channel ${chName}: "${textToSpeak}"`);
-          
-          // Instantly react to the Discord message for beautiful, fast non-blocking feedback!
-          message.react('🗣️').catch(() => {});
-          
-          await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
-        } else {
-          message.react('❌').catch(() => {});
-        }
-      } catch (err: any) {
-        debugLog(`Error processing text message listener: ${err.message}`);
-      }
-    });
-
-    client!.on('error', (err) => {
-      debugLog(`Discord client error event: ${err.message}`);
-    });
-
-    client!.login(currentToken).catch(err => {
-      debugLog(`Discord login command rejected: ${err.message}`);
-      client?.destroy();
       client = null;
-      reject(err);
-    });
-  });
+      throw err;
+    }
+  }
 }
 
 // Ensure clean audio URL fetching via google-tts-api
