@@ -46,56 +46,212 @@ if (ffmpeg) {
 }
 
 let client: Client | null = null;
+const activeGuildIds = new Set<string>();
 
-function resolveMentions(text: string, guild: any): string {
+async function resolveMentions(text: string, guild: any): Promise<string> {
   if (!text) return text;
   let resolved = text;
 
   // Resolve user mentions: <@123456789> or <@!123456789>
   const userRegex = /<@!?(\d+)>/g;
-  resolved = resolved.replace(userRegex, (match, userId) => {
+  const userMatches = [...resolved.matchAll(userRegex)];
+  for (const match of userMatches) {
+    const fullMatch = match[0];
+    const userId = match[1];
+    let name = "someone";
     if (guild) {
-      const member = guild.members.cache.get(userId);
-      if (member) {
-        return member.displayName || member.user.username;
-      }
+      try {
+        let member = guild.members.cache.get(userId);
+        if (!member) {
+          member = await guild.members.fetch(userId).catch(() => null);
+        }
+        if (member) {
+          name = member.displayName || member.user.username;
+        }
+      } catch (e) {}
     }
-    const user = client?.users.cache.get(userId);
-    if (user) {
-      return user.displayName || user.username;
+    if (name === "someone") {
+      try {
+        let user = client?.users.cache.get(userId);
+        if (!user) {
+          user = await client?.users.fetch(userId).catch(() => null);
+        }
+        if (user) {
+          name = user.displayName || user.username;
+        }
+      } catch (e) {}
     }
-    return "someone";
-  });
+    resolved = resolved.replace(fullMatch, name);
+  }
 
   // Resolve role mentions: <@&123456789>
   const roleRegex = /<@&(\d+)>/g;
-  resolved = resolved.replace(roleRegex, (match, roleId) => {
+  const roleMatches = [...resolved.matchAll(roleRegex)];
+  for (const match of roleMatches) {
+    const fullMatch = match[0];
+    const roleId = match[1];
+    let name = "a role";
     if (guild) {
-      const role = guild.roles.cache.get(roleId);
-      if (role) {
-        return role.name;
-      }
+      try {
+        let role = guild.roles.cache.get(roleId);
+        if (!role) {
+          role = await guild.roles.fetch(roleId).catch(() => null);
+        }
+        if (role) {
+          name = role.name;
+        }
+      } catch (e) {}
     }
-    return "a role";
-  });
+    resolved = resolved.replace(fullMatch, name);
+  }
 
   // Resolve channel mentions: <#123456789>
   const channelRegex = /<#(\d+)>/g;
-  resolved = resolved.replace(channelRegex, (match, channelId) => {
+  const channelMatches = [...resolved.matchAll(channelRegex)];
+  for (const match of channelMatches) {
+    const fullMatch = match[0];
+    const channelId = match[1];
+    let name = "a channel";
     if (guild) {
-      const channel = guild.channels.cache.get(channelId);
-      if (channel) {
-        return channel.name;
-      }
+      try {
+        let channel = guild.channels.cache.get(channelId);
+        if (!channel) {
+          channel = await guild.channels.fetch(channelId).catch(() => null);
+        }
+        if (channel) {
+          name = channel.name;
+        }
+      } catch (e) {}
     }
-    const globalChannel = client?.channels.cache.get(channelId);
-    if (globalChannel && 'name' in globalChannel) {
-      return (globalChannel as any).name;
+    if (name === "a channel") {
+      try {
+        const globalChannel = client?.channels.cache.get(channelId) || await client?.channels.fetch(channelId).catch(() => null);
+        if (globalChannel && 'name' in globalChannel) {
+          name = (globalChannel as any).name;
+        }
+      } catch (e) {}
     }
-    return "a channel";
-  });
+    resolved = resolved.replace(fullMatch, name);
+  }
 
   return resolved;
+}
+
+export function getOrCreateVoiceConnection(channel: any): any {
+  const guildId = channel.guild.id;
+  activeGuildIds.add(guildId);
+  let connection = getVoiceConnection(guildId);
+  
+  // If there's an existing voice connection but it's in a broken state, destroy it first so we can rebuild cleanly
+  if (connection) {
+    const status = connection.state.status;
+    if (status === VoiceConnectionStatus.Disconnected || status === VoiceConnectionStatus.Destroyed) {
+      debugLog(`Existing connection in guild ${guildId} is ${status}. Destroying to reconnect cleanly.`);
+      try {
+        connection.destroy();
+      } catch (e) {}
+      connection = null;
+    } else if (connection.joinConfig.channelId !== channel.id) {
+      debugLog(`Channel mismatch for guild ${guildId} (expected "${channel.name}" but connected to channel ID ${connection.joinConfig.channelId}). Destroying and switching.`);
+      try {
+        connection.destroy();
+      } catch (e) {}
+      connection = null;
+    }
+  }
+
+  if (!connection) {
+    debugLog(`Connecting to voice channel: "${channel.name}" in guild "${channel.guild.name}"...`);
+    connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guildId,
+      adapterCreator: channel.guild.voiceAdapterCreator as any,
+      selfDeaf: true,
+      selfMute: false,
+    });
+  }
+
+  return connection;
+}
+
+export async function ensureVoiceConnectionReady(connection: any, channel: any): Promise<boolean> {
+  const guildId = channel.guild.id;
+
+  // If already ready, return instantly
+  if (connection.state.status === VoiceConnectionStatus.Ready) {
+    return true;
+  }
+
+  // Hook listeners for robust reconnection state changes
+  if (!connection._hasListeners) {
+    connection._hasListeners = true;
+    connection.on('stateChange', (oldState: any, newState: any) => {
+      debugLog(`[Voice Connection State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+    });
+
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        // If disconnected, try to wait for automatic reconnection signalling/connecting
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 4000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 4000),
+        ]);
+      } catch (error) {
+        debugLog(`[Voice Connection] Real disconnection detected for guild ${guildId}. Attempting automatic reconnection...`);
+        try {
+          connection.reconnect();
+        } catch (e: any) {
+          debugLog(`[Voice Connection] Reconnect attempt failed: ${e.message}`);
+        }
+      }
+    });
+  }
+
+  try {
+    debugLog(`Waiting for Voice Connection to become READY in channel "${channel.name}"...`);
+    // Standard 10s wait for GCP Cloud Run / Sandbox networks
+    await entersState(connection, VoiceConnectionStatus.Ready, 10000);
+    debugLog(`Voice Connection is now READY in channel "${channel.name}"`);
+    return true;
+  } catch (err: any) {
+    debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
+    debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
+    debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
+    debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
+    
+    // --- Self-Healing Retry ---
+    // Re-creating the connection forces a brand-new UDP socket binding which handles strict NATs / frozen routes
+    debugLog(`[Self-Healing] Re-creating a brand-new connection for channel "${channel.name}" to force fresh socket routing...`);
+    try {
+      connection.destroy();
+    } catch (e) {}
+
+    const newConnection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guildId,
+      adapterCreator: channel.guild.voiceAdapterCreator as any,
+      selfDeaf: true,
+      selfMute: false,
+    });
+
+    newConnection.on('stateChange', (oldState: any, newState: any) => {
+      debugLog(`[Voice Connection Retry State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+    });
+
+    try {
+      await entersState(newConnection, VoiceConnectionStatus.Ready, 10000);
+      debugLog(`[Self-Healing SUCCESS] Retried connection succeeded! Voice is now READY.`);
+      // Update persistent player registry with the new connection if necessary
+      getOrCreateGuildPlayer(guildId, newConnection);
+      return true;
+    } catch (retryErr: any) {
+      debugLog(`[Self-Healing FAILURE] Ready state retry also timed out for channel "${channel.name}": ${retryErr.message}`);
+      try {
+        newConnection.destroy();
+      } catch (e) {}
+      return false;
+    }
+  }
 }
 
 const globalVoicePlayer = createAudioPlayer();
@@ -204,19 +360,9 @@ export async function playLocalFileInChannels(filePath: string, channelIds: stri
         continue;
       }
 
-      let connection = getVoiceConnection(channel.guild.id);
-      if (!connection || connection.joinConfig.channelId !== channel.id) {
-        connection = joinVoiceChannel({
-          channelId: channel.id,
-          guildId: channel.guild.id,
-          adapterCreator: channel.guild.voiceAdapterCreator as any,
-        });
-      }
-
-      try {
-        await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-      } catch (err: any) {
-        debugLog(`Voice Ready timeout for ${channel.name}: ${err.message}`);
+      const connection = getOrCreateVoiceConnection(channel);
+      const isReady = await ensureVoiceConnectionReady(connection, channel);
+      if (!isReady) {
         continue;
       }
 
@@ -328,7 +474,7 @@ export async function initDiscordBot(
             if (voiceChannel) {
               try {
                 debugLog(`Interactions command (/ss) triggered by ${interaction.user.tag} for: "${textToSpeak}"`);
-                const cleanSpeech = resolveMentions(textToSpeak, interaction.guild);
+                const cleanSpeech = await resolveMentions(textToSpeak, interaction.guild);
                 await playAudioInVoiceChannels(cleanSpeech, [voiceChannel.id], globalSettings.voiceLang || 'en');
                 await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
               } catch (playErr: any) {
@@ -377,7 +523,7 @@ export async function initDiscordBot(
               // Instantly react to the Discord message for beautiful, fast non-blocking feedback!
               message.react('🗣️').catch(() => {});
               
-              const cleanSpeech = resolveMentions(textToSpeak, message.guild);
+              const cleanSpeech = await resolveMentions(textToSpeak, message.guild);
               await playAudioInVoiceChannels(cleanSpeech, [voiceChannel.id], globalSettings.voiceLang || 'en');
             } else {
               message.react('❌').catch(() => {});
@@ -544,36 +690,9 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
         continue;
       }
 
-      debugLog(`Fetching voice connection for channel: ${channel.name} (guild: ${channel.guild.name})`);
-      let connection = getVoiceConnection(channel.guild.id);
-      
-      if (!connection || connection.joinConfig.channelId !== channel.id) {
-        debugLog(`No active voice connection or channel mismatch. Connecting now...`);
-        connection = joinVoiceChannel({
-          channelId: channel.id,
-          guildId: channel.guild.id,
-          adapterCreator: channel.guild.voiceAdapterCreator as any,
-          selfDeaf: true,
-          selfMute: false
-        });
-      }
-
-      try {
-        if (connection.state.status !== VoiceConnectionStatus.Ready) {
-          debugLog(`Waiting for Voice Connection to become READY in ${channel.name}...`);
-          await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-          debugLog(`Voice Connection is READY in ${channel.name}`);
-        } else {
-          debugLog(`Voice Connection is ALREADY READY in ${channel.name}`);
-        }
-      } catch (err: any) {
-        debugLog(`TIMEOUT ERROR - Voice Connection failed to reach READY state in 15s for ${channel.name}: ${err.message}`);
-        try {
-          connection.destroy();
-          debugLog(`TIDIED UP: Terminated stalled connection for guild ${channel.guild.id}`);
-        } catch (destroyErr: any) {
-          debugLog(`Failed during cleaning up stalled connection: ${destroyErr.message}`);
-        }
+      const connection = getOrCreateVoiceConnection(channel);
+      const isReady = await ensureVoiceConnectionReady(connection, channel);
+      if (!isReady) {
         continue;
       }
 
@@ -675,15 +794,8 @@ export async function autoJoinScheduledChannels(
       const channel = await client.channels.fetch(channelId);
       if (!channel || channel.type !== ChannelType.GuildVoice) continue;
 
-      let connection = getVoiceConnection(channel.guild.id);
-      if (!connection || connection.joinConfig.channelId !== channel.id) {
-        console.log(`Auto-joining voice channel ${channel.name} since it has a scheduled event today.`);
-        joinVoiceChannel({
-          channelId: channel.id,
-          guildId: channel.guild.id,
-          adapterCreator: channel.guild.voiceAdapterCreator as any,
-        });
-      }
+      console.log(`Auto-joining voice channel ${channel.name} since it has a scheduled event today.`);
+      getOrCreateVoiceConnection(channel);
     } catch (error) {
       console.error(`Error auto-joining channel ${channelId}:`, error);
     }
@@ -858,4 +970,30 @@ function startScheduleLoop(
       }
     }
   }, 1000);
+}
+
+export function stopDiscordBot() {
+  debugLog("Manual token disengagement triggered: Stopping and destroying all active voice connections...");
+  for (const guildId of activeGuildIds) {
+    try {
+      const connection = getVoiceConnection(guildId);
+      if (connection) {
+        debugLog(`Destroying active voice connection in guild: ${guildId}`);
+        connection.destroy();
+      }
+    } catch (e: any) {
+      debugLog(`Error destroying connection for guild ${guildId}: ${e.message}`);
+    }
+  }
+  activeGuildIds.clear();
+
+  if (client) {
+    debugLog("Manual token disengagement triggered: Stopping and destroying current Discord Bot client instance...");
+    try {
+      client.destroy();
+    } catch (e: any) {
+      debugLog(`Error while destroying client: ${e.message}`);
+    }
+    client = null;
+  }
 }

@@ -189,6 +189,19 @@ async function startServer() {
     }
   });
 
+  // API to disconnect and disengage of token conflict
+  app.post("/api/discord/disconnect", async (req, res) => {
+    try {
+      const { stopDiscordBot } = await import("./discordBot.js");
+      stopDiscordBot();
+      process.env.DISCORD_TOKEN = "";
+      savePrefs();
+      res.json({ success: true, message: "Discord bot stopped successfully and session disengaged." });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to disengage bot: " + err.message });
+    }
+  });
+
   app.post("/api/discord/test", async (req, res) => {
     try {
       const { testVoice } = await import("./discordBot.js");

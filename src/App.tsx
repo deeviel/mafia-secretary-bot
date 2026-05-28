@@ -288,6 +288,26 @@ export default function App() {
     .finally(() => setIsDiscordConnecting(false));
   };
 
+  const handleDiscordDisconnect = () => {
+    fetch('/api/discord/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    .then(async res => {
+      if (!res.ok) throw new Error("Failed to disconnect bot");
+      const data = await res.json();
+      if (data && data.success) {
+        setIsDiscordConnected(false);
+        setAvailableChannels([]);
+        showToast("Discord bot stopped in preview environment to prevent token conflicts.", "success");
+      }
+    })
+    .catch(err => {
+      console.error(err);
+      showToast("Error during bot disconnection: " + String(err), "error");
+    });
+  };
+
   const handleAudioUpload = (file: File) => {
     if (!file.name.toLowerCase().endsWith('.mp3')) {
       showToast("Only MP3 audio files are permitted.", "error");
@@ -519,15 +539,24 @@ export default function App() {
             {isDiscordConnected ? (
               <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 items-center bg-[#07090F]/70 border border-slate-800/40 p-4 rounded-2xl">
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 font-semibold">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                    </span>
-                    BOT ONLINE & BOUND TO VOICE
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono">
+                    <div className="flex items-center gap-2 text-emerald-400 font-semibold">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                      </span>
+                      BOT ONLINE & BOUND TO VOICE
+                    </div>
+                    <button
+                      onClick={handleDiscordDisconnect}
+                      title="Disconnect the bot on this environment to avoid conflicts with your production bot deployments"
+                      className="text-[10px] text-rose-400/90 hover:text-rose-400 bg-rose-950/30 hover:bg-rose-950/50 border border-rose-900/45 px-2.5 py-1 rounded-md font-bold transition-all hover:scale-[1.02] active:scale-[0.98]"
+                    >
+                      Disconnect Bot
+                    </button>
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-1 lines-relaxed">
-                    The Secretary is listening in real-time. Audio warnings and time triggers will output directly to selected Discord channels.
+                  <p className="text-[11px] text-slate-500 mt-1.5 lines-relaxed">
+                    The Secretary is listening in real-time. Disconnect this local instance if it conflicts with your production bot at secretary.mafia.anvorte.com.
                   </p>
                 </div>
                 
@@ -588,6 +617,17 @@ export default function App() {
                     {isDiscordConnecting ? 'Authenticating...' : 'Establish Connection'}
                   </button>
                 </form>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-2 pt-3 border-t border-slate-800/20 font-mono text-[11px] text-slate-500">
+                  <span>Need to avoid token conflicts with your production bot?</span>
+                  <button
+                    type="button"
+                    onClick={handleDiscordDisconnect}
+                    className="text-[10px] text-rose-400 hover:text-rose-300 bg-rose-950/25 hover:bg-rose-950/45 border border-rose-900/40 px-3 py-1.5 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98] font-bold"
+                  >
+                    Isolate & Disconnect Local Bot
+                  </button>
+                </div>
               </div>
             )}
           </div>
