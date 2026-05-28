@@ -11,7 +11,7 @@ class SpeechService {
   private voice: SpeechSynthesisVoice | null = null;
   public availableVoices: SpeechSynthesisVoice[] = [];
   public voicesLoaded: boolean = false;
-  private onVoicesLoadedCallback: (() => void) | null = null;
+  private listeners: (() => void)[] = [];
 
   constructor() {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -19,14 +19,43 @@ class SpeechService {
       
       const loadVoices = () => {
         if (!this.synth) return;
-        this.availableVoices = this.synth.getVoices().filter(v => v.lang.startsWith('en'));
+        
+        // Filter English and Tagalog/Filipino voices to support proper bilingual pronunciation accents
+        this.availableVoices = this.synth.getVoices().filter(v => 
+          v.lang.startsWith('en') || 
+          v.lang.startsWith('tl') || 
+          v.lang.startsWith('fil')
+        );
+
         if (this.availableVoices.length > 0) {
           this.voicesLoaded = true;
-          if (!this.voice) {
-            // Prefer a smooth english voice
-            this.voice = this.availableVoices.find(v => v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Tessa')) || this.availableVoices[0];
+          
+          let savedUri = null;
+          try {
+            savedUri = localStorage.getItem('selectedVoiceUri');
+          } catch (e) {}
+
+          if (savedUri) {
+            const matched = this.availableVoices.find(v => v.voiceURI === savedUri);
+            if (matched) {
+              this.voice = matched;
+            }
           }
-          if (this.onVoicesLoadedCallback) this.onVoicesLoadedCallback();
+
+          if (!this.voice) {
+            // Prefer a smooth voice if no stored preset
+            this.voice = this.availableVoices.find(v => 
+              v.name.includes('Google') || 
+              v.name.includes('Samantha') || 
+              v.name.includes('Tessa') ||
+              v.lang.startsWith('tl') ||
+              v.lang.startsWith('fil')
+            ) || this.availableVoices[0];
+          }
+          
+          this.listeners.forEach(cb => {
+            try { cb(); } catch (e) {}
+          });
         }
       };
 
@@ -37,12 +66,18 @@ class SpeechService {
     }
   }
 
-  onVoicesLoaded(cb: () => void) {
+  subscribe(cb: () => void) {
+    this.listeners.push(cb);
     if (this.voicesLoaded) {
-      cb();
-    } else {
-      this.onVoicesLoadedCallback = cb;
+      try { cb(); } catch (e) {}
     }
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== cb);
+    };
+  }
+
+  onVoicesLoaded(cb: () => void) {
+    this.subscribe(cb);
   }
 
   getVoices(): VoiceOption[] {

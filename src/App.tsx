@@ -189,7 +189,7 @@ export default function App() {
       })
       .catch(err => console.error("Failed to load settings", err));
 
-    speech.onVoicesLoaded(() => {
+    const unsubscribeSpeech = speech.subscribe(() => {
       const v = speech.getVoices();
       setVoices(v);
       const saved = localStorage.getItem('selectedVoiceUri');
@@ -202,7 +202,10 @@ export default function App() {
       }
     });
     
-    return () => clearInterval(intv);
+    return () => {
+      clearInterval(intv);
+      unsubscribeSpeech();
+    };
   }, []);
 
   const syncSchedule = (updatedEvents: ScheduledEvent[]) => {

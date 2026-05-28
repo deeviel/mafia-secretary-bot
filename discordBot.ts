@@ -15,6 +15,12 @@ import ffmpeg from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
+import dns from 'dns';
+import { Readable } from 'stream';
+
+if (dns && typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 process.on('unhandledRejection', (reason, promise) => {
   debugLog(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
@@ -206,6 +212,8 @@ export async function initDiscordBot(
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
     ]
   });
 
@@ -217,7 +225,7 @@ export async function initDiscordBot(
       });
       startScheduleLoop(globalSchedule, globalSettings);
 
-      // Register /ss global slash commands
+      // Register /ss global slash commands and clear redundant guild commands to prevent duplicates
       try {
         client?.application?.commands.create({
           name: 'ss',
@@ -235,8 +243,18 @@ export async function initDiscordBot(
         }).catch(err => {
           debugLog(`Failed during global slash command '/ss' registration: ${err.message}`);
         });
+
+        // Clear guild-level /ss commands so they don't double-up with the global command
+        client?.guilds.cache.forEach(guild => {
+          guild.commands.set([]).then(() => {
+            debugLog(`Cleared custom guild-level slash commands for: "${guild.name}" to prevent duplication.`);
+          }).catch(err => {
+            debugLog(`Guild-level command resetting bypassed or failed for "${guild.name}": ${err.message}`);
+          });
+        });
+
       } catch (err: any) {
-        debugLog(`Error queuing slash command register: ${err.message}`);
+        debugLog(`Error cleaning up & registering slash commands: ${err.message}`);
       }
 
       resolve();
@@ -246,23 +264,74 @@ export async function initDiscordBot(
       try {
         if (!interaction.isChatInputCommand()) return;
         if (interaction.commandName === 'ss') {
+          // SECURE IMMEDIATE DEFERRAL to completely prevent 3-second Discord expiration ("Unknown interaction")
+          await interaction.deferReply().catch(err => {
+            debugLog(`Immediate deferReply failed: ${err.message}`);
+          });
+
           const textToSpeak = interaction.options.getString('text');
           if (!textToSpeak) {
-            await interaction.reply({ content: "Please supply the text to speak.", ephemeral: true });
+            await interaction.editReply({ content: "❌ Please supply the text to speak." }).catch(() => {});
             return;
           }
+
           const member = interaction.guild?.members.cache.get(interaction.user.id);
           const voiceChannel = member?.voice?.channel;
           if (voiceChannel) {
-            await interaction.deferReply();
-            await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
-            await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` });
+            try {
+              debugLog(`Interactions command (/ss) triggered by ${interaction.user.tag} for: "${textToSpeak}"`);
+              await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
+              await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
+            } catch (playErr: any) {
+              debugLog(`Failed to speak via interactions: ${playErr.message}`);
+              await interaction.editReply({ content: `❌ Stalled voice stream: ${playErr.message}` }).catch(() => {});
+            }
           } else {
-            await interaction.reply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.`, ephemeral: true });
+            await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
           }
         }
       } catch (err: any) {
         debugLog(`Error processing slash interaction: ${err.message}`);
+      }
+    });
+
+    client!.on('messageCreate', async (message) => {
+      try {
+        if (!message.guild || message.author.bot) return;
+
+        const content = message.content.trim();
+        let textToSpeak = '';
+        
+        // Match clean /ss as a fast alternate, !ss, .ss, or ss prefix-less commands
+        const lower = content.toLowerCase();
+        if (lower.startsWith('ss ')) {
+          textToSpeak = content.substring(3).trim();
+        } else if (lower.startsWith('!ss ')) {
+          textToSpeak = content.substring(4).trim();
+        } else if (lower.startsWith('.ss ')) {
+          textToSpeak = content.substring(4).trim();
+        } else if (lower.startsWith('/ss ')) {
+          textToSpeak = content.substring(4).trim();
+        }
+
+        if (!textToSpeak) return;
+
+        // Get guild member
+        const member = message.guild.members.cache.get(message.author.id) || await message.guild.members.fetch(message.author.id).catch(() => null);
+        const voiceChannel = member?.voice?.channel;
+        if (voiceChannel) {
+          const chName = 'name' in message.channel ? (message.channel as any).name : 'unknown-channel';
+          debugLog(`Plain-text text transmission triggered by ${message.author.tag} in channel ${chName}: "${textToSpeak}"`);
+          
+          // Instantly react to the Discord message for beautiful, fast non-blocking feedback!
+          message.react('🗣️').catch(() => {});
+          
+          await playAudioInVoiceChannels(textToSpeak, [voiceChannel.id], globalSettings.voiceLang || 'en');
+        } else {
+          message.react('❌').catch(() => {});
+        }
+      } catch (err: any) {
+        debugLog(`Error processing text message listener: ${err.message}`);
       }
     });
 
@@ -305,6 +374,33 @@ export function getAvailableVoiceChannels() {
   return channels;
 }
 
+function isTaglishOrTagalog(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const tagalogWords = [
+    'po', 'opo', 'na', 'pa', 'ba', 'sa', 'ng', 'mga', 'ang', 'at', 'o',
+    'ako', 'ikaw', 'ka', 'kami', 'tayo', 'sila', 'natin', 'namin', 'inyo', 'kanya', 'kanila', 'ito', 'iyan', 'iyon', 'dito', 'diyan', 'doon', 'kayo',
+    'gising', 'tulog', 'tara', 'laro', 'lods', 'boss', 'pre', 'gago', 'tangina', 'kupal', 'bobo', 'pucha', 
+    'boto', 'botohan', 'vouch', 'patay', 'buhay', 'pumatay', 'papatay', 'mafia', 'secretary', 
+    'bata', 'kuya', 'ate', 'kapit', 'ano', 'bakit', 'paano', 'kailan', 'saan', 'sino', 'salamat', 
+    'kamusta', 'kumusta', 'wala', 'meron', 'mayroon', 'hindi', 'oo', 'lang', 'naman', 'nga', 'din', 'rin',
+    'gabi', 'umaga', 'tanghali', 'hapon', 'araw', 'oras', 'sulat', 'basa', 'magulo', 'ayos', 'basta', 
+    'talaga', 'sige', 'muna', 'pala', 'sana', 'kahit', 'mismo', 'kasi', 'dahil', 'kaya', 'para'
+  ];
+
+  const words = normalized.split(/[^a-zA-Z]+/);
+  for (const word of words) {
+    if (tagalogWords.includes(word)) {
+      return true;
+    }
+  }
+
+  if (normalized.includes('mga') || normalized.includes('ng ') || normalized.includes(' ng ') || normalized.includes('ang ') || normalized.includes(' ang ')) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function testVoice(channelId: string, lang = 'en') {
   console.log(`Running test voice on channel ${channelId} with lang ${lang}`);
   await playAudioInVoiceChannels("This is a test message to verify the voice channel connection.", [channelId], lang);
@@ -318,12 +414,25 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
     else return;
   }
 
-  debugLog(`Requested TTS broadcast for text: "${text}" into channels: ${channelIds.join(', ')}`);
+  // Clean and map language code
+  let resolvedLang = lang.toLowerCase();
+  
+  // Auto-detect Tagalog/Taglish or enforce 'tl' if explicitly selected or detected
+  if (resolvedLang.startsWith('tl') || resolvedLang.startsWith('fil') || isTaglishOrTagalog(text)) {
+    resolvedLang = 'tl';
+  } else if (resolvedLang.startsWith('en')) {
+    resolvedLang = 'en';
+  } else {
+    // Standard ISO 2-letter fallback if subcode is sent
+    resolvedLang = resolvedLang.split('-')[0];
+  }
 
-  let tempPath = '';
+  debugLog(`Requested TTS broadcast for text: "${text}" into channels: ${channelIds.join(', ')} with resolved lang: "${resolvedLang}"`);
+
+  let audioBuffer: Buffer;
   try {
     const url = googleTTS.getAudioUrl(text, {
-      lang: lang,
+      lang: resolvedLang,
       slow: false,
       host: 'https://translate.google.com',
     });
@@ -335,33 +444,12 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
       throw new Error(`Google TTS request failed with HTTP status ${response.status}`);
     }
     const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    
-    tempPath = path.join(process.cwd(), `tts-temp-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp3`);
-    fs.writeFileSync(tempPath, buffer);
-    debugLog(`Successfully downloaded TTS file. Size: ${buffer.byteLength} bytes. Saved to: ${tempPath}`);
+    audioBuffer = Buffer.from(arrayBuffer);
+    debugLog(`Successfully downloaded TTS file. Size: ${audioBuffer.byteLength} bytes. Streaming directly in-memory.`);
   } catch (err: any) {
     debugLog(`CRITICAL - TTS Download failed: ${err.message}`);
     return;
   }
-
-  // Define a cleanup function
-  const cleanupTmpFile = (filePath: string) => {
-    if (!filePath) return;
-    try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        debugLog(`Cleaned up temporary TTS audio file: ${filePath}`);
-      }
-    } catch (e: any) {
-      debugLog(`Error deleting file ${filePath}: ${e.message}`);
-    }
-  };
-
-  const currentTempPath = tempPath;
-  setTimeout(() => {
-    cleanupTmpFile(currentTempPath);
-  }, 25000);
 
   for (const channelId of channelIds) {
     try {
@@ -380,23 +468,36 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
           channelId: channel.id,
           guildId: channel.guild.id,
           adapterCreator: channel.guild.voiceAdapterCreator as any,
+          selfDeaf: true,
+          selfMute: false
         });
       }
 
       try {
-        debugLog(`Waiting for Voice Connection to become READY in ${channel.name}...`);
-        await entersState(connection, VoiceConnectionStatus.Ready, 15000);
-        debugLog(`Voice Connection is READY in ${channel.name}`);
+        if (connection.state.status !== VoiceConnectionStatus.Ready) {
+          debugLog(`Waiting for Voice Connection to become READY in ${channel.name}...`);
+          await entersState(connection, VoiceConnectionStatus.Ready, 15000);
+          debugLog(`Voice Connection is READY in ${channel.name}`);
+        } else {
+          debugLog(`Voice Connection is ALREADY READY in ${channel.name}`);
+        }
       } catch (err: any) {
         debugLog(`TIMEOUT ERROR - Voice Connection failed to reach READY state in 15s for ${channel.name}: ${err.message}`);
+        try {
+          connection.destroy();
+          debugLog(`TIDIED UP: Terminated stalled connection for guild ${channel.guild.id}`);
+        } catch (destroyErr: any) {
+          debugLog(`Failed during cleaning up stalled connection: ${destroyErr.message}`);
+        }
         continue;
       }
 
       const player = getOrCreateGuildPlayer(channel.guild.id, connection);
       
-      // Use Arbitrary StreamType to transcode the raw saved mp3 using ffmpeg
-      debugLog(`Creating audio resource from local file: ${currentTempPath}`);
-      const resource = createAudioResource(currentTempPath, {
+      // Optimize: Create a readable stream directly from memory buffer representing the TTS audio, bypassing disk I/O completely
+      debugLog(`Streaming buffered audio directly in-memory to persistent voice player.`);
+      const stream = Readable.from(audioBuffer);
+      const resource = createAudioResource(stream, {
         inputType: StreamType.Arbitrary
       });
       
