@@ -11,6 +11,12 @@
           e.stopImmediatePropagation();
         }
       }, true);
+      window.addEventListener('unhandledrejection', function(e) {
+        if (e.reason && e.reason.message && e.reason.message.includes('Failed to fetch')) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      });
     </script>
   </head>
   <body>

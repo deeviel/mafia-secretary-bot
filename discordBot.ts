@@ -750,6 +750,9 @@ function applyPhonetics(text: string, lang: string): string {
   mapped = mapped.replace(/\b(ha){2,}h?\b/gi, "ha ha ha ha ha ha");
   mapped = mapped.replace(/\b(he){2,}h?\b/gi, "hehe hehe hehe");
 
+  // Specific user/nickname phonetics
+  mapped = mapped.replace(/\bla{2,}ns\b/gi, "LANCEEEEEEE");
+
   if (lang.startsWith('tl') || lang.startsWith('fil')) {
     mapped = mapped.replace(/\btangina\b/gi, "tang ina");
     mapped = mapped.replace(/\btanginamo\b/gi, "tang ina mo");
