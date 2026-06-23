@@ -61,6 +61,7 @@ if (ffmpeg) {
 
 let client: Client | null = null;
 const activeGuildIds = new Set<string>();
+let lastAudioPlayTime = 0;
 
 async function resolveMentions(text: string, guild: any): Promise<string> {
   if (!text) return text;
@@ -233,10 +234,15 @@ export async function ensureVoiceConnectionReady(connection: any, channel: any):
     debugLog(`Voice Connection is now READY in channel "${channel.name}"`);
     return true;
   } catch (err: any) {
-    debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
-    debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
-    debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
-    debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
+    const errStr = String(err.message || err);
+    if (!errStr.includes("The operation was aborted") && !errStr.includes("destroyed")) {
+      debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
+      debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
+      debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
+      debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
+    } else {
+      debugLog(`[Voice Connection State] Connection to channel "${channel.name}" cleanly terminated before reaching READY (likely clean disconnect or timeout jump).`);
+    }
     
     // --- Self-Healing Retry ---
     // Re-creating the connection forces a brand-new UDP socket binding which handles strict NATs / frozen routes
@@ -367,7 +373,7 @@ export async function preCacheSpeechSounds(): Promise<void> {
   }
 }
 
-export async function playLocalFileInChannels(filePath: string, channelIds: string[]) {
+export async function playLocalFileInChannels(filePath: string, channelIds: string[], options?: { volume?: number, maxDurationSec?: number }) {
   if (!client || !channelIds || channelIds.length === 0) {
     const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
     if (fallbackId) channelIds = [fallbackId];
@@ -391,9 +397,24 @@ export async function playLocalFileInChannels(filePath: string, channelIds: stri
 
       const player = getOrCreateGuildPlayer(channel.guild.id, connection);
       const resource = createAudioResource(filePath, {
-        inputType: StreamType.Arbitrary
+        inputType: StreamType.Arbitrary,
+        inlineVolume: options?.volume !== undefined
       });
+
+      if (options?.volume !== undefined) {
+        resource.volume?.setVolume(options.volume / 100);
+      }
+
       player.play(resource);
+      lastAudioPlayTime = Date.now();
+
+      if (options?.maxDurationSec) {
+        setTimeout(() => {
+          if (player.state.status === AudioPlayerStatus.Playing) {
+            player.stop();
+          }
+        }, options.maxDurationSec * 1000);
+      }
     } catch (error: any) {
       debugLog(`Failed during execution of playLocalFile in channel ${channelId}: ${error.message}`);
     }
@@ -412,6 +433,7 @@ export interface DiscordBotSettings {
   voiceStartText?: string;
   warningAudioOffsetSec?: number;
   warningAudioFileName?: string;
+  warningAudioVolume?: number;
 }
 
 export async function initDiscordBot(
@@ -630,29 +652,53 @@ export function getAvailableVoiceChannels() {
 
 function isTaglishOrTagalog(text: string): boolean {
   const normalized = text.toLowerCase();
-  const tagalogWords = [
-    'po', 'opo', 'na', 'pa', 'ba', 'sa', 'ng', 'mga', 'ang', 'at', 'o',
-    'ako', 'ikaw', 'ka', 'kami', 'tayo', 'sila', 'natin', 'namin', 'inyo', 'kanya', 'kanila', 'ito', 'iyan', 'iyon', 'dito', 'diyan', 'doon', 'kayo',
-    'gising', 'tulog', 'tara', 'laro', 'lods', 'boss', 'pre', 'gago', 'tangina', 'kupal', 'bobo', 'pucha', 
-    'boto', 'botohan', 'vouch', 'patay', 'buhay', 'pumatay', 'papatay', 'mafia', 'secretary', 
-    'bata', 'kuya', 'ate', 'kapit', 'ano', 'bakit', 'paano', 'kailan', 'saan', 'sino', 'salamat', 
-    'kamusta', 'kumusta', 'wala', 'meron', 'mayroon', 'hindi', 'oo', 'lang', 'naman', 'nga', 'din', 'rin',
+  
+  const strongTagalogWords = [
+    'po', 'opo', 'ikaw', 'kami', 'tayo', 'sila', 'natin', 'namin', 'inyo', 'kanya', 'kanila', 'dito', 'diyan', 'doon', 'kayo',
+    'gising', 'tulog', 'tara', 'laro', 'lods', 'boss', 'pre', 'gago', 'tangina', 'kupal', 'bobo', 'pucha', 'ulol',
+    'botohan', 'patay', 'buhay', 'pumatay', 'papatay', 
+    'kuya', 'ate', 'bakit', 'paano', 'kailan', 'saan', 'sino', 'salamat', 
+    'kamusta', 'kumusta', 'meron', 'mayroon', 'hindi', 'naman', 'nga', 
     'gabi', 'umaga', 'tanghali', 'hapon', 'araw', 'oras', 'sulat', 'basa', 'magulo', 'ayos', 'basta', 
-    'talaga', 'sige', 'muna', 'pala', 'sana', 'kahit', 'mismo', 'kasi', 'dahil', 'kaya', 'para'
+    'talaga', 'sige', 'muna', 'pala', 'sana', 'kahit', 'mismo', 'kasi', 'dahil', 'kaya'
   ];
+  
+  const smallWords = ['na', 'pa', 'ba', 'sa', 'ng', 'mga', 'ang', 'at', 'o', 'ako', 'ito', 'iyon', 'wala', 'oo', 'lang', 'din', 'rin', 'para'];
 
   const words = normalized.split(/[^a-zA-Z]+/);
+  let strongCount = 0;
+  let smallCount = 0;
+
   for (const word of words) {
-    if (tagalogWords.includes(word)) {
-      return true;
-    }
+    if (strongTagalogWords.includes(word)) strongCount++;
+    else if (smallWords.includes(word)) smallCount++;
   }
+
+  if (strongCount >= 1) return true;
+  if (smallCount >= 2) return true;
 
   if (normalized.includes('mga') || normalized.includes('ng ') || normalized.includes(' ng ') || normalized.includes('ang ') || normalized.includes(' ang ')) {
     return true;
   }
 
   return false;
+}
+
+function applyPhonetics(text: string, lang: string): string {
+  let mapped = text;
+  // Laughing phonetics globally
+  mapped = mapped.replace(/\b(ha){2,}h?\b/gi, "ha ha ha ha ha ha");
+  mapped = mapped.replace(/\b(he){2,}h?\b/gi, "hehe hehe hehe");
+
+  if (lang.startsWith('tl') || lang.startsWith('fil')) {
+    mapped = mapped.replace(/\btangina\b/gi, "tang ina");
+    mapped = mapped.replace(/\btanginamo\b/gi, "tang ina mo");
+    mapped = mapped.replace(/\bgago\b/gi, "ga go");
+    mapped = mapped.replace(/\bulol\b/gi, "u lol");
+    mapped = mapped.replace(/\bpucha\b/gi, "pu tsha");
+    mapped = mapped.replace(/\bbobo\b/gi, "bo bo");
+  }
+  return mapped;
 }
 
 export async function testVoice(channelId: string, lang = 'en') {
@@ -691,11 +737,14 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
     }
   }
 
+  // Apply phonetic fixes
+  const spokenText = applyPhonetics(text, resolvedLang);
+
   debugLog(`Requested TTS broadcast for text: "${text}" into channels: ${channelIds.join(', ')} with resolved lang: "${resolvedLang}"`);
 
   let audioBuffer: Buffer;
   try {
-    const url = googleTTS.getAudioUrl(text, {
+    const url = googleTTS.getAudioUrl(spokenText, {
       lang: resolvedLang,
       slow: false,
       host: 'https://translate.google.com',
@@ -739,6 +788,7 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
       });
       
       player.play(resource);
+      lastAudioPlayTime = Date.now();
       debugLog(`Play triggered on persistent player in channel: ${channel.name}`);
     } catch (error: any) {
       debugLog(`Failed during execution of playAudio in channel ${channelId}: ${error.message}`);
@@ -792,49 +842,6 @@ function getTzOffsetMs(timeZone: string, date: Date = new Date()): number {
   }
 }
 
-export async function autoJoinScheduledChannels(
-  globalSchedule: { events: ScheduledEvent[] },
-  globalSettings?: { timezone?: string, voiceLang?: string }
-) {
-  if (!client || !client.isReady()) return;
-
-  const tz = globalSettings?.timezone || 'UTC';
-  const offsetMs = getTzOffsetMs(tz, new Date());
-  const localNowDate = new Date(Date.now() + offsetMs);
-  const today = localNowDate.getUTCDay(); // Get correct localized day of week
-  const events = globalSchedule.events || [];
-
-  // Filter events that are enabled and scheduled for today
-  const todaysEvents = events.filter(e => 
-    e.enabled && (!e.days || e.days.length === 0 || e.days.includes(today))
-  );
-
-  const voiceChannelIds = new Set<string>();
-  todaysEvents.forEach(e => {
-    if (e.channelIds && Array.isArray(e.channelIds)) {
-      e.channelIds.forEach(id => {
-        if (id) voiceChannelIds.add(id);
-      });
-    }
-  });
-
-  if (voiceChannelIds.size === 0) {
-    return;
-  }
-
-  for (const channelId of voiceChannelIds) {
-    try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || channel.type !== ChannelType.GuildVoice) continue;
-
-      console.log(`Auto-joining voice channel ${channel.name} since it has a scheduled event today.`);
-      getOrCreateVoiceConnection(channel);
-    } catch (error) {
-      console.error(`Error auto-joining channel ${channelId}:`, error);
-    }
-  }
-}
-
 let scheduleInterval: any;
 
 // Evaluate events every second
@@ -853,14 +860,6 @@ function startScheduleLoop(
     const tz = globalSettings.timezone || 'UTC';
     const offsetMs = getTzOffsetMs(tz, new Date(now));
     const localNowDate = new Date(now + offsetMs);
-
-    // Check and run auto-join every 10 seconds
-    if (now - lastAutoJoinTime >= 10000) {
-      lastAutoJoinTime = now;
-      autoJoinScheduledChannels(globalSchedule, globalSettings).catch(err => {
-        console.error("Auto-joining channel error:", err);
-      });
-    }
 
     let nextEvent: ScheduledEvent | null = null;
     let nextTime = Infinity;
@@ -904,11 +903,56 @@ function startScheduleLoop(
        }
     });
 
+    const msLeft = nextEvent ? nextTime - now : Infinity;
+    const minsLeft = nextEvent ? Math.ceil(msLeft / 60000) : Infinity;
+
+    // Check and run auto-join every 10 seconds
+    if (now - lastAutoJoinTime >= 10000) {
+      lastAutoJoinTime = now;
+      let shouldBeConnected = false;
+      let targetConnectionChannels: string[] = [];
+
+      if (nextEvent) {
+          const warnMins = globalSettings.warnings || [];
+          if (minsLeft <= 30 && minsLeft >= -5) {
+             shouldBeConnected = true;
+          } else {
+             for (const w of warnMins) {
+                 if (minsLeft <= w + 5 && minsLeft >= w - 1) {
+                    shouldBeConnected = true;
+                 }
+             }
+          }
+          if (shouldBeConnected) targetConnectionChannels = nextEvent.channelIds || [];
+      }
+
+      // Check `/ss` idle timeout
+      const timeSinceLastAudio = now - lastAudioPlayTime;
+      if (timeSinceLastAudio < 5 * 60 * 1000) {
+          shouldBeConnected = true; 
+      }
+
+      if (shouldBeConnected && targetConnectionChannels.length > 0) {
+          targetConnectionChannels.forEach(channelId => {
+             client?.channels.fetch(channelId).then(channel => {
+                 if (channel?.type === ChannelType.GuildVoice) getOrCreateVoiceConnection(channel);
+             }).catch(()=>{});
+          });
+      } else if (!shouldBeConnected && activeGuildIds.size > 0) {
+          // Disconnect all if no active triggers
+          for (const guildId of activeGuildIds) {
+             try {
+                const conn = getVoiceConnection(guildId);
+                if (conn) conn.destroy();
+             } catch(e){}
+          }
+          activeGuildIds.clear();
+      }
+    }
+
     if (!nextEvent) return;
 
-    const msLeft = nextTime - now;
     const secsLeft = Math.round(msLeft / 1000);
-    const minsLeft = Math.ceil(msLeft / 60000);
 
     const eventId = nextEvent.id;
     const occurrenceId = `${eventId}_${nextTime}`;
@@ -948,12 +992,12 @@ function startScheduleLoop(
           const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
           const customAudioPath = path.join(process.cwd(), customFileName);
           if (fs.existsSync(customAudioPath)) {
-            playLocalFileInChannels(customAudioPath, targetChannels);
-            debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name}`);
+            playLocalFileInChannels(customAudioPath, targetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 });
+            debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name} with volume ${globalSettings.warningAudioVolume || 100}% playing for max 10s`);
           } else {
             const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
             if (fs.existsSync(fallbackPath)) {
-              playLocalFileInChannels(fallbackPath, targetChannels);
+              playLocalFileInChannels(fallbackPath, targetChannels, { volume: 100, maxDurationSec: 10 });
               debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name}`);
             } else {
               debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);

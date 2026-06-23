@@ -21,11 +21,21 @@ class SpeechService {
         if (!this.synth) return;
         
         // Filter English and Tagalog/Filipino voices to support proper bilingual pronunciation accents
-        this.availableVoices = this.synth.getVoices().filter(v => 
-          v.lang.startsWith('en') || 
-          v.lang.startsWith('tl') || 
-          v.lang.startsWith('fil')
+        const allSystemVoices = this.synth.getVoices();
+        const hasNaturalEnglish = allSystemVoices.some(vi => 
+          vi.lang.startsWith('en') && (vi.name.includes('Natural') || vi.name.includes('Google') || vi.name.includes('Samantha'))
         );
+
+        this.availableVoices = allSystemVoices.filter(v => {
+          if (v.lang.startsWith('tl') || v.lang.startsWith('fil')) return true;
+          if (v.lang.startsWith('en')) {
+            if (hasNaturalEnglish) {
+              return v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha');
+            }
+            return true;
+          }
+          return false;
+        });
 
         if (this.availableVoices.length > 0) {
           this.voicesLoaded = true;

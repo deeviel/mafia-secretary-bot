@@ -33,6 +33,7 @@ export default function App() {
   const [voiceStartText, setVoiceStartText] = useState('Clear comms and chat and get that win.');
   const [warningAudioOffsetSec, setWarningAudioOffsetSec] = useState(30);
   const [warningAudioFileName, setWarningAudioFileName] = useState('godfather-theme-15s.mp3');
+  const [warningAudioVolume, setWarningAudioVolume] = useState(100);
   const [availableAudioFiles, setAvailableAudioFiles] = useState<string[]>(['godfather-theme-15s.mp3']);
   const [isUploading, setIsUploading] = useState(false);
   
@@ -175,6 +176,7 @@ export default function App() {
         if (typeof data.voiceStartText === 'string') setVoiceStartText(data.voiceStartText);
         if (typeof data.warningAudioOffsetSec === 'number') setWarningAudioOffsetSec(data.warningAudioOffsetSec);
         if (typeof data.warningAudioFileName === 'string') setWarningAudioFileName(data.warningAudioFileName);
+        if (typeof data.warningAudioVolume === 'number') setWarningAudioVolume(data.warningAudioVolume);
         setTimezone("Asia/Manila");
         // Ensure backend setting is set to Asia/Manila too
         fetch('/api/settings', {
@@ -223,13 +225,15 @@ export default function App() {
     newVoiceLang?: string,
     newVoiceStartText?: string,
     newWarningOffset?: number,
-    newWarningFile?: string
+    newWarningFile?: string,
+    newWarningVolume?: number
   ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
     if (newVoiceStartText !== undefined) setVoiceStartText(newVoiceStartText);
     if (newWarningOffset !== undefined) setWarningAudioOffsetSec(newWarningOffset);
     if (newWarningFile !== undefined) setWarningAudioFileName(newWarningFile);
+    if (newWarningVolume !== undefined) setWarningAudioVolume(newWarningVolume);
 
     const lang = newVoiceLang || voices.find(v => v.uri === selectedVoice)?.lang || 'en';
     
@@ -240,7 +244,8 @@ export default function App() {
       voiceLang: lang,
       voiceStartText: newVoiceStartText !== undefined ? newVoiceStartText : voiceStartText,
       warningAudioOffsetSec: newWarningOffset !== undefined ? newWarningOffset : warningAudioOffsetSec,
-      warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName
+      warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName,
+      warningAudioVolume: newWarningVolume !== undefined ? newWarningVolume : warningAudioVolume
     };
 
     fetch('/api/settings', {
@@ -743,6 +748,31 @@ export default function App() {
                   ) : (
                     <p className="text-[10px] text-slate-500 italic">No custom audio files uploaded yet.</p>
                   )}
+
+                  <div className="flex gap-3 items-center">
+                    <label className="text-xs text-slate-400 font-mono">Vol: {warningAudioVolume}%</label>
+                    <input 
+                      type="range" 
+                      min="1" 
+                      max="100" 
+                      value={warningAudioVolume} 
+                      onChange={e => {
+                        const val = parseInt(e.target.value);
+                        setWarningAudioVolume(val);
+                      }}
+                      onMouseUp={e => {
+                        const val = parseInt((e.target as HTMLInputElement).value);
+                        syncSettings(warnings, voiceCountdown, undefined, voiceStartText, warningAudioOffsetSec, warningAudioFileName, val);
+                        showToast(`Warning sound volume set to ${val}%`, "success");
+                      }}
+                      onTouchEnd={e => {
+                        const val = parseInt((e.target as HTMLInputElement).value);
+                        syncSettings(warnings, voiceCountdown, undefined, voiceStartText, warningAudioOffsetSec, warningAudioFileName, val);
+                        showToast(`Warning sound volume set to ${val}%`, "success");
+                      }}
+                      className="flex-1 accent-rose-500 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
 
                   {/* Drag & Drop Area */}
                   <div 

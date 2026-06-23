@@ -35,14 +35,15 @@ export const globalSchedule: { events: ScheduledEvent[] } = {
   ]
 };
 
-export const globalSettings = {
+export const globalSettings: any = {
   warnings: [30, 15, 5, 1], // Notification minutes
   voiceCountdown: true,      // 10s countdown
   timezone: "Asia/Manila",
   voiceLang: "en",
   voiceStartText: "Clear comms and chat and get that win.",
   warningAudioOffsetSec: 30,
-  warningAudioFileName: "godfather-theme-15s.mp3"
+  warningAudioFileName: "godfather-theme-15s.mp3",
+  warningAudioVolume: 100
 };
 
 const PREFS_FILE = path.join(process.cwd(), '.discord-prefs.json');
@@ -123,6 +124,9 @@ async function startServer() {
     }
     if (typeof req.body.warningAudioFileName === 'string') {
       globalSettings.warningAudioFileName = req.body.warningAudioFileName;
+    }
+    if (typeof req.body.warningAudioVolume === 'number') {
+      globalSettings.warningAudioVolume = req.body.warningAudioVolume;
     }
     globalSettings.timezone = "Asia/Manila";
     savePrefs();
