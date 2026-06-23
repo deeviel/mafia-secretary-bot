@@ -298,17 +298,35 @@ type QueueItem = {
 
 const guildAudioQueues = new Map<string, QueueItem[]>();
 const guildIsPlaying = new Map<string, boolean>();
+const guildIdleTimeouts = new Map<string, NodeJS.Timeout>();
 
 export function playNext(guildId: string, player: any, connection: any) {
+  // Clear any existing idle timeout
+  const timeout = guildIdleTimeouts.get(guildId);
+  if (timeout) {
+    clearTimeout(timeout);
+    guildIdleTimeouts.delete(guildId);
+  }
+
   const queue = guildAudioQueues.get(guildId) || [];
   if (queue.length === 0) {
-    debugLog(`Queue empty for guild ${guildId}, disconnecting bot from voice...`);
-    try {
-      connection.destroy();
-    } catch (e) {}
-    activeGuildIds.delete(guildId);
-    guildPlayers.delete(guildId);
     guildIsPlaying.set(guildId, false);
+    debugLog(`Queue empty for guild ${guildId}, scheduling disconnect in 5 minutes if idle...`);
+    
+    const newTimeout = setTimeout(() => {
+      // Check if it's still idle
+      if (!guildIsPlaying.get(guildId) && (guildAudioQueues.get(guildId) || []).length === 0) {
+        debugLog(`Guild ${guildId} idle for 5 minutes, disconnecting bot from voice...`);
+        try {
+          connection.destroy();
+        } catch (e) {}
+        activeGuildIds.delete(guildId);
+        guildPlayers.delete(guildId);
+      }
+      guildIdleTimeouts.delete(guildId);
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    guildIdleTimeouts.set(guildId, newTimeout);
     return;
   }
   
@@ -563,14 +581,19 @@ export async function initDiscordBot(
         try {
           if (!interaction.isChatInputCommand()) return;
           if (interaction.commandName === 'ss') {
-            // SECURE IMMEDIATE DEFERRAL to completely prevent 3-second Discord expiration ("Unknown interaction")
+            let deferSuccess = true;
             await interaction.deferReply().catch(err => {
-              debugLog(`Immediate deferReply failed: ${err.message}`);
+              deferSuccess = false;
+              if (err.message && !err.message.includes('Unknown interaction')) {
+                debugLog(`Immediate deferReply failed: ${err.message}`);
+              }
             });
 
             const textToSpeak = interaction.options.getString('text');
             if (!textToSpeak) {
-              await interaction.editReply({ content: "❌ Please supply the text to speak." }).catch(() => {});
+              if (deferSuccess) {
+                await interaction.editReply({ content: "❌ Please supply the text to speak." }).catch(() => {});
+              }
               return;
             }
 
@@ -581,13 +604,19 @@ export async function initDiscordBot(
                 debugLog(`Interactions command (/ss) triggered by ${interaction.user.tag} for: "${textToSpeak}"`);
                 const cleanSpeech = await resolveMentions(textToSpeak, interaction.guild);
                 await playAudioInVoiceChannels(cleanSpeech, [voiceChannel.id], globalSettings.voiceLang || 'en');
-                await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
+                if (deferSuccess) {
+                  await interaction.editReply({ content: `🗣️ *Speaking:* "${textToSpeak}"` }).catch(() => {});
+                }
               } catch (playErr: any) {
                 debugLog(`Failed to speak via interactions: ${playErr.message}`);
-                await interaction.editReply({ content: `❌ Stalled voice stream: ${playErr.message}` }).catch(() => {});
+                if (deferSuccess) {
+                  await interaction.editReply({ content: `❌ Stalled voice stream: ${playErr.message}` }).catch(() => {});
+                }
               }
             } else {
-              await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
+              if (deferSuccess) {
+                await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
+              }
             }
           }
         } catch (err: any) {
@@ -1007,7 +1036,7 @@ function startScheduleLoop(
       if (hasActiveQueues) {
           shouldBeConnected = true; 
       }
-      if (now - lastAudioPlayTime < 3 * 60 * 1000) {
+      if (now - lastAudioPlayTime < 5 * 60 * 1000) {
           shouldBeConnected = true;
       }
 
