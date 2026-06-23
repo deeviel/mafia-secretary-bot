@@ -291,6 +291,41 @@ globalVoicePlayer.on('error', error => {
 
 const lastSpokenValues = new Map<string, number>();
 
+type QueueItem = {
+  createResource: () => any;
+  onStart?: (player: any) => void;
+};
+
+const guildAudioQueues = new Map<string, QueueItem[]>();
+const guildIsPlaying = new Map<string, boolean>();
+
+export function playNext(guildId: string, player: any, connection: any) {
+  const queue = guildAudioQueues.get(guildId) || [];
+  if (queue.length === 0) {
+    debugLog(`Queue empty for guild ${guildId}, disconnecting bot from voice...`);
+    try {
+      connection.destroy();
+    } catch (e) {}
+    activeGuildIds.delete(guildId);
+    guildPlayers.delete(guildId);
+    guildIsPlaying.set(guildId, false);
+    return;
+  }
+  
+  guildIsPlaying.set(guildId, true);
+  const nextItem = queue.shift();
+  try {
+    const resource = nextItem!.createResource();
+    player.play(resource);
+    if (nextItem!.onStart) {
+      nextItem!.onStart(player);
+    }
+  } catch (err) {
+    debugLog(`Failed to create/play resource for guild ${guildId}: ${err}`);
+    playNext(guildId, player, connection);
+  }
+}
+
 // Persistent Player registry
 const guildPlayers = new Map<string, any>();
 
@@ -302,8 +337,18 @@ export function getOrCreateGuildPlayer(guildId: string, connection: any) {
     
     player.on('error', (error: any) => {
       debugLog(`Persistent Player error on guild ${guildId}: ${error.message}`);
+      playNext(guildId, player, connection);
+    });
+
+    player.on(AudioPlayerStatus.Idle, () => {
+      // Small delay helps Discord not cut off the end of speech abruptly
+      setTimeout(() => {
+        playNext(guildId, player, connection);
+      }, 500);
     });
   }
+  
+  // Resubscribe if the connection changed
   connection.subscribe(player);
   return player;
 }
@@ -395,25 +440,40 @@ export async function playLocalFileInChannels(filePath: string, channelIds: stri
         continue;
       }
 
-      const player = getOrCreateGuildPlayer(channel.guild.id, connection);
-      const resource = createAudioResource(filePath, {
-        inputType: StreamType.Arbitrary,
-        inlineVolume: options?.volume !== undefined
-      });
+      const guildId = channel.guild.id;
+      const player = getOrCreateGuildPlayer(guildId, connection);
+      
+      const createResource = () => {
+        const resource = createAudioResource(filePath, {
+          inputType: StreamType.Arbitrary,
+          inlineVolume: options?.volume !== undefined
+        });
 
-      if (options?.volume !== undefined) {
-        resource.volume?.setVolume(options.volume / 100);
-      }
+        if (options?.volume !== undefined) {
+          resource.volume?.setVolume(options.volume / 100);
+        }
+        return resource;
+      };
 
-      player.play(resource);
-      lastAudioPlayTime = Date.now();
-
-      if (options?.maxDurationSec) {
-        setTimeout(() => {
-          if (player.state.status === AudioPlayerStatus.Playing) {
-            player.stop();
+      const queue = guildAudioQueues.get(guildId) || [];
+      queue.push({
+        createResource,
+        onStart: (p) => {
+          if (options?.maxDurationSec) {
+            setTimeout(() => {
+              if (p.state.status === AudioPlayerStatus.Playing) {
+                p.stop();
+              }
+            }, options.maxDurationSec * 1000);
           }
-        }, options.maxDurationSec * 1000);
+        }
+      });
+      guildAudioQueues.set(guildId, queue);
+
+      lastAudioPlayTime = Date.now();
+      
+      if (!guildIsPlaying.get(guildId)) {
+        playNext(guildId, player, connection);
       }
     } catch (error: any) {
       debugLog(`Failed during execution of playLocalFile in channel ${channelId}: ${error.message}`);
@@ -778,18 +838,28 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
         continue;
       }
 
-      const player = getOrCreateGuildPlayer(channel.guild.id, connection);
+      const guildId = channel.guild.id;
+      const player = getOrCreateGuildPlayer(guildId, connection);
       
-      // Optimize: Create a readable stream directly from memory buffer representing the TTS audio, bypassing disk I/O completely
-      debugLog(`Streaming buffered audio directly in-memory to persistent voice player.`);
-      const stream = Readable.from(audioBuffer);
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary
-      });
+      const createResource = () => {
+        debugLog(`Streaming buffered audio directly in-memory to persistent voice player.`);
+        // We recreate the stream inside the closure so it reads from the start each time it queues
+        const stream = Readable.from(audioBuffer);
+        return createAudioResource(stream, {
+          inputType: StreamType.Arbitrary
+        });
+      };
       
-      player.play(resource);
+      const queue = guildAudioQueues.get(guildId) || [];
+      queue.push({ createResource });
+      guildAudioQueues.set(guildId, queue);
+      
       lastAudioPlayTime = Date.now();
-      debugLog(`Play triggered on persistent player in channel: ${channel.name}`);
+      debugLog(`Play queued on persistent player in channel: ${channel.name}`);
+      
+      if (!guildIsPlaying.get(guildId)) {
+        playNext(guildId, player, connection);
+      }
     } catch (error: any) {
       debugLog(`Failed during execution of playAudio in channel ${channelId}: ${error.message}`);
     }
@@ -914,11 +984,11 @@ function startScheduleLoop(
 
       if (nextEvent) {
           const warnMins = globalSettings.warnings || [];
-          if (minsLeft <= 30 && minsLeft >= -5) {
+          if (minsLeft <= 5 && minsLeft >= -5) {
              shouldBeConnected = true;
           } else {
              for (const w of warnMins) {
-                 if (minsLeft <= w + 5 && minsLeft >= w - 1) {
+                 if (minsLeft <= w + 2 && minsLeft >= w - 1) {
                     shouldBeConnected = true;
                  }
              }
@@ -926,10 +996,16 @@ function startScheduleLoop(
           if (shouldBeConnected) targetConnectionChannels = nextEvent.channelIds || [];
       }
 
-      // Check `/ss` idle timeout
-      const timeSinceLastAudio = now - lastAudioPlayTime;
-      if (timeSinceLastAudio < 5 * 60 * 1000) {
+      // Check active voice queues
+      let hasActiveQueues = false;
+      for (const isPlay of Array.from(guildIsPlaying.values())) {
+         if (isPlay) hasActiveQueues = true;
+      }
+      if (hasActiveQueues) {
           shouldBeConnected = true; 
+      }
+      if (now - lastAudioPlayTime < 3 * 60 * 1000) {
+          shouldBeConnected = true;
       }
 
       if (shouldBeConnected && targetConnectionChannels.length > 0) {
