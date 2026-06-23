@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mafia Secretary</title>
+    <script>
+      window.addEventListener('error', function(e) {
+        if (e.message === 'Script error.' || e.message === 'Script error') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      }, true);
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -194,7 +194,11 @@ export default function App() {
     const unsubscribeSpeech = speech.subscribe(() => {
       const v = speech.getVoices();
       setVoices(v);
-      const saved = localStorage.getItem('selectedVoiceUri');
+      let saved = null;
+      try {
+        saved = localStorage.getItem('selectedVoiceUri');
+      } catch (e) {}
+      
       if (saved) {
         speech.setVoiceByUri(saved);
         setSelectedVoice(saved);
@@ -259,7 +263,9 @@ export default function App() {
     const uri = e.target.value;
     setSelectedVoice(uri);
     speech.setVoiceByUri(uri);
-    localStorage.setItem('selectedVoiceUri', uri);
+    try {
+      localStorage.setItem('selectedVoiceUri', uri);
+    } catch (e) {}
     speech.speak("Voice updated successfully.", 1.0, true);
     const v = voices.find(v => v.uri === uri);
     if (v) syncSettings(warnings, voiceCountdown, v.lang);
