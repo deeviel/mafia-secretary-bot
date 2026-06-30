@@ -195,97 +195,119 @@ export function getOrCreateVoiceConnection(channel: any, group?: string): any {
   return connection;
 }
 
-export async function ensureVoiceConnectionReady(connection: any, channel: any): Promise<boolean> {
+const voiceReadyPromises = new Map<string, Promise<boolean>>();
+
+export async function ensureVoiceConnectionReady(connection: any, channel: any, group?: string): Promise<boolean> {
   const guildId = channel.guild.id;
+  const connectionKey = group ? `${guildId}_${group}` : guildId;
 
   // If already ready, return instantly
   if (connection.state.status === VoiceConnectionStatus.Ready) {
     return true;
   }
 
-  // Hook listeners for robust reconnection state changes
-  if (!connection._hasListeners) {
-    connection._hasListeners = true;
-    
-    connection.on('error', (err: any) => {
-      debugLog(`[Voice Connection Error Handled] Guild ${guildId} encountered connection or IP discovery issue: ${err.message}`);
-    });
-
-    connection.on('stateChange', (oldState: any, newState: any) => {
-      debugLog(`[Voice Connection State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
-    });
-
-    connection.on(VoiceConnectionStatus.Disconnected, async () => {
-      try {
-        // If disconnected, try to wait for automatic reconnection signalling/connecting
-        await Promise.race([
-          entersState(connection, VoiceConnectionStatus.Signalling, 4000),
-          entersState(connection, VoiceConnectionStatus.Connecting, 4000),
-        ]);
-      } catch (error) {
-        debugLog(`[Voice Connection] Real disconnection detected for guild ${guildId}. Attempting automatic reconnection...`);
-        try {
-          connection.reconnect();
-        } catch (e: any) {
-          debugLog(`[Voice Connection] Reconnect attempt failed: ${e.message}`);
-        }
-      }
-    });
+  // If there's an active ready-check promise, await it
+  if (voiceReadyPromises.has(connectionKey)) {
+    debugLog(`[Voice Connection] Awaiting existing ready check for key: ${connectionKey}...`);
+    return await voiceReadyPromises.get(connectionKey)!;
   }
 
-  try {
-    debugLog(`Waiting for Voice Connection to become READY in channel "${channel.name}"...`);
-    // Standard 10s wait for GCP Cloud Run / Sandbox networks
-    await entersState(connection, VoiceConnectionStatus.Ready, 10000);
-    debugLog(`Voice Connection is now READY in channel "${channel.name}"`);
-    return true;
-  } catch (err: any) {
-    const errStr = String(err.message || err);
-    if (!errStr.includes("The operation was aborted") && !errStr.includes("destroyed")) {
-      debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
-      debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
-      debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
-      debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
-    } else {
-      debugLog(`[Voice Connection State] Connection to channel "${channel.name}" cleanly terminated before reaching READY (likely clean disconnect or timeout jump).`);
+  const checkPromise = (async () => {
+    // Hook listeners for robust reconnection state changes
+    if (!connection._hasListeners) {
+      connection._hasListeners = true;
+      
+      connection.on('error', (err: any) => {
+        debugLog(`[Voice Connection Error Handled] Guild ${guildId} encountered connection or IP discovery issue: ${err.message}`);
+      });
+
+      connection.on('stateChange', (oldState: any, newState: any) => {
+        debugLog(`[Voice Connection State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+      });
+
+      connection.on(VoiceConnectionStatus.Disconnected, async () => {
+        try {
+          // If disconnected, try to wait for automatic reconnection signalling/connecting
+          await Promise.race([
+            entersState(connection, VoiceConnectionStatus.Signalling, 4000),
+            entersState(connection, VoiceConnectionStatus.Connecting, 4000),
+          ]);
+        } catch (error) {
+          debugLog(`[Voice Connection] Real disconnection detected for guild ${guildId}. Attempting automatic reconnection...`);
+          try {
+            connection.reconnect();
+          } catch (e: any) {
+            debugLog(`[Voice Connection] Reconnect attempt failed: ${e.message}`);
+          }
+        }
+      });
     }
-    
-    // --- Self-Healing Retry ---
-    // Re-creating the connection forces a brand-new UDP socket binding which handles strict NATs / frozen routes
-    debugLog(`[Self-Healing] Re-creating a brand-new connection for channel "${channel.name}" to force fresh socket routing...`);
-    try {
-      connection.destroy();
-    } catch (e) {}
-
-    const newConnection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: guildId,
-      adapterCreator: channel.guild.voiceAdapterCreator as any,
-      selfDeaf: true,
-      selfMute: false,
-    });
-
-    newConnection.on('error', (err: any) => {
-      debugLog(`[Voice Connection Retry Error Handled] Guild ${guildId} encountered connection or IP discovery issue: ${err.message}`);
-    });
-
-    newConnection.on('stateChange', (oldState: any, newState: any) => {
-      debugLog(`[Voice Connection Retry State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
-    });
 
     try {
-      await entersState(newConnection, VoiceConnectionStatus.Ready, 10000);
-      debugLog(`[Self-Healing SUCCESS] Retried connection succeeded! Voice is now READY.`);
-      // Update persistent player registry with the new connection if necessary
-      getOrCreateGuildPlayer(guildId, newConnection);
+      debugLog(`Waiting for Voice Connection to become READY in channel "${channel.name}"...`);
+      // Standard 10s wait for GCP Cloud Run / Sandbox networks
+      await entersState(connection, VoiceConnectionStatus.Ready, 10000);
+      debugLog(`Voice Connection is now READY in channel "${channel.name}"`);
       return true;
-    } catch (retryErr: any) {
-      debugLog(`[Self-Healing FAILURE] Ready state retry also timed out for channel "${channel.name}": ${retryErr.message}`);
+    } catch (err: any) {
+      const errStr = String(err.message || err);
+      if (!errStr.includes("The operation was aborted") && !errStr.includes("destroyed")) {
+        debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
+        debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
+        debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
+        debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
+      } else {
+        debugLog(`[Voice Connection State] Connection to channel "${channel.name}" cleanly terminated before reaching READY (likely clean disconnect or timeout jump).`);
+        return false;
+      }
+      
+      // --- Self-Healing Retry ---
+      // Re-creating the connection forces a brand-new UDP socket binding which handles strict NATs / frozen routes
+      debugLog(`[Self-Healing] Re-creating a brand-new connection for channel "${channel.name}" to force fresh socket routing...`);
       try {
-        newConnection.destroy();
+        connection.destroy();
       } catch (e) {}
-      return false;
+
+      const newConnection = joinVoiceChannel({
+        channelId: channel.id,
+        guildId: guildId,
+        adapterCreator: channel.guild.voiceAdapterCreator as any,
+        selfDeaf: true,
+        selfMute: false,
+        group: group
+      });
+
+      newConnection.on('error', (err: any) => {
+        debugLog(`[Voice Connection Retry Error Handled] Guild ${guildId} encountered connection or IP discovery issue: ${err.message}`);
+      });
+
+      newConnection.on('stateChange', (oldState: any, newState: any) => {
+        debugLog(`[Voice Connection Retry State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+      });
+
+      try {
+        await entersState(newConnection, VoiceConnectionStatus.Ready, 10000);
+        debugLog(`[Self-Healing SUCCESS] Retried connection succeeded! Voice is now READY.`);
+        // Update persistent player registry with the new connection if necessary
+        getOrCreateGuildPlayer(connectionKey, newConnection);
+        return true;
+      } catch (retryErr: any) {
+        debugLog(`[Self-Healing FAILURE] Ready state retry also timed out for channel "${channel.name}": ${retryErr.message}`);
+        try {
+          newConnection.destroy();
+        } catch (e) {}
+        return false;
+      }
     }
+  })();
+
+  voiceReadyPromises.set(connectionKey, checkPromise);
+
+  try {
+    const result = await checkPromise;
+    return result;
+  } finally {
+    voiceReadyPromises.delete(connectionKey);
   }
 }
 
@@ -450,7 +472,7 @@ async function playLocalFileInChannelForClient(
   options?: { volume?: number, maxDurationSec?: number }
 ) {
   const connection = getOrCreateVoiceConnection(channel, group);
-  const isReady = await ensureVoiceConnectionReady(connection, channel);
+  const isReady = await ensureVoiceConnectionReady(connection, channel, group);
   if (!isReady) {
     return;
   }
@@ -1190,7 +1212,7 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
       }
 
       const connection = getOrCreateVoiceConnection(channel, group);
-      const isReady = await ensureVoiceConnectionReady(connection, channel);
+      const isReady = await ensureVoiceConnectionReady(connection, channel, group);
       if (!isReady) {
         continue;
       }
@@ -1490,7 +1512,7 @@ function startScheduleLoop(
                 client2?.channels.fetch(channelId).then(async channel => {
                     if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
                         const connection = getOrCreateVoiceConnection(channel, "bot2");
-                        await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
+                        await ensureVoiceConnectionReady(connection, channel, "bot2").catch(()=>{});
                     }
                 }).catch(()=>{});
              });
