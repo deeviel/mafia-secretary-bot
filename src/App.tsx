@@ -91,6 +91,8 @@ export default function App() {
   const [newEventTime, setNewEventTime] = useState('09:00');
   const [newEventChannelIds, setNewEventChannelIds] = useState<string[]>([]);
   const [newEventDays, setNewEventDays] = useState<number[]>([]);
+  const [newEventAutoTransfer, setNewEventAutoTransfer] = useState(false);
+  const [newEventAutoTransferDelayMins, setNewEventAutoTransferDelayMins] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // New warning form state
@@ -109,6 +111,7 @@ export default function App() {
   // Additional settings
   const [bot2ChannelId, setBot2ChannelId] = useState('');
   const [autoTransferAtStart, setAutoTransferAtStart] = useState(false);
+  const [autoTransferDelayMins, setAutoTransferDelayMins] = useState(0);
   
   // Discord channels
   const [availableChannels, setAvailableChannels] = useState<{id:string, name:string, guildName:string}[]>([]);
@@ -200,6 +203,7 @@ export default function App() {
         if (typeof data.warningAudioVolume === 'number') setWarningAudioVolume(data.warningAudioVolume);
         if (typeof data.bot2ChannelId === 'string') setBot2ChannelId(data.bot2ChannelId);
         if (typeof data.autoTransferAtStart === 'boolean') setAutoTransferAtStart(data.autoTransferAtStart);
+        if (typeof data.autoTransferDelayMins === 'number') setAutoTransferDelayMins(data.autoTransferDelayMins);
         setTimezone("Asia/Manila");
         // Ensure backend setting is set to Asia/Manila too
         fetch('/api/settings', {
@@ -275,7 +279,8 @@ export default function App() {
     newWarningFile?: string,
     newWarningVolume?: number,
     newBot2ChannelId?: string,
-    newAutoTransferAtStart?: boolean
+    newAutoTransferAtStart?: boolean,
+    newAutoTransferDelayMins?: number
   ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
@@ -286,10 +291,12 @@ export default function App() {
     if (newWarningVolume !== undefined) setWarningAudioVolume(newWarningVolume);
     if (newBot2ChannelId !== undefined) setBot2ChannelId(newBot2ChannelId);
     if (newAutoTransferAtStart !== undefined) setAutoTransferAtStart(newAutoTransferAtStart);
+    if (newAutoTransferDelayMins !== undefined) setAutoTransferDelayMins(newAutoTransferDelayMins);
 
     const lang = newVoiceLang !== undefined ? newVoiceLang : voiceLang;
     const bot2Ch = newBot2ChannelId !== undefined ? newBot2ChannelId : bot2ChannelId;
     const autoTrans = newAutoTransferAtStart !== undefined ? newAutoTransferAtStart : autoTransferAtStart;
+    const autoTransDelay = newAutoTransferDelayMins !== undefined ? newAutoTransferDelayMins : autoTransferDelayMins;
     
     const postBody = {
       warnings: updatedWarnings,
@@ -301,7 +308,8 @@ export default function App() {
       warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName,
       warningAudioVolume: newWarningVolume !== undefined ? newWarningVolume : warningAudioVolume,
       bot2ChannelId: bot2Ch,
-      autoTransferAtStart: autoTrans
+      autoTransferAtStart: autoTrans,
+      autoTransferDelayMins: autoTransDelay
     };
 
     fetch('/api/settings', {
@@ -481,7 +489,15 @@ export default function App() {
 
     if (editingId) {
         const updated = events.map(ev => 
-            ev.id === editingId ? { ...ev, name: newEventName, time: newEventTime, channelIds: newEventChannelIds, days: newEventDays } : ev
+            ev.id === editingId ? { 
+              ...ev, 
+              name: newEventName, 
+              time: newEventTime, 
+              channelIds: newEventChannelIds, 
+              days: newEventDays,
+              autoTransferEnabled: newEventAutoTransfer,
+              autoTransferDelayMins: newEventAutoTransferDelayMins
+            } : ev
         );
         syncSchedule(updated);
         setEditingId(null);
@@ -492,13 +508,17 @@ export default function App() {
             time: newEventTime,
             enabled: true,
             channelIds: newEventChannelIds,
-            days: newEventDays
+            days: newEventDays,
+            autoTransferEnabled: newEventAutoTransfer,
+            autoTransferDelayMins: newEventAutoTransferDelayMins
         };
         syncSchedule([...events, newEv]);
     }
     setNewEventName('');
     setNewEventChannelIds([]);
     setNewEventDays([]);
+    setNewEventAutoTransfer(false);
+    setNewEventAutoTransferDelayMins(0);
   };
 
   const handleEdit = (ev: ScheduledEvent) => {
@@ -507,6 +527,8 @@ export default function App() {
     setNewEventTime(ev.time);
     setNewEventChannelIds(ev.channelIds || []);
     setNewEventDays(ev.days || []);
+    setNewEventAutoTransfer(ev.autoTransferEnabled || false);
+    setNewEventAutoTransferDelayMins(ev.autoTransferDelayMins || 0);
   };
 
   const cancelEdit = () => {
@@ -514,6 +536,8 @@ export default function App() {
     setNewEventName('');
     setNewEventChannelIds([]);
     setNewEventDays([]);
+    setNewEventAutoTransfer(false);
+    setNewEventAutoTransferDelayMins(0);
   };
 
   const removeEvent = (id: string) => {
@@ -797,7 +821,7 @@ export default function App() {
 
                     <div className="flex items-center justify-between gap-2 py-1">
                       <div className="flex flex-col">
-                        <span className="text-[10px] font-bold text-slate-400">Auto Transfer at T-0</span>
+                        <span className="text-[10px] font-bold text-slate-400">Auto Transfer Active</span>
                         <span className="text-[8px] text-slate-500">Moves all users to target channel</span>
                       </div>
                       <input 
@@ -806,11 +830,31 @@ export default function App() {
                         onChange={e => {
                           const val = e.target.checked;
                           syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, val);
-                          showToast(val ? "Auto transfer engaged for T-0" : "Auto transfer disabled", "info");
+                          showToast(val ? "Auto transfer engaged" : "Auto transfer disabled", "info");
                         }}
                         className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500/30 bg-[#05060a] border-slate-800 cursor-pointer"
                       />
                     </div>
+
+                    {autoTransferAtStart && (
+                      <div className="flex flex-col gap-1 py-1">
+                        <div className="flex justify-between items-center text-[10px] font-bold text-slate-400">
+                          <span>Transfer Delay (Minutes)</span>
+                          <span className="text-[9px] font-mono text-indigo-400">{autoTransferDelayMins === 0 ? "Immediate (T-0)" : `T + ${autoTransferDelayMins} mins`}</span>
+                        </div>
+                        <input 
+                          type="number"
+                          min="0"
+                          max="60"
+                          value={autoTransferDelayMins}
+                          onChange={e => {
+                            const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                            syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, val);
+                          }}
+                          className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2.5 py-1.5 outline-none focus:border-indigo-500/50 transition-colors w-full font-mono"
+                        />
+                      </div>
+                    )}
 
                     <button
                       type="button"
@@ -1184,12 +1228,20 @@ export default function App() {
                     </button>
                     <div className={`transition-opacity duration-300 ${ev.enabled ? 'opacity-100' : 'opacity-40'}`}>
                       <p className="text-sm font-bold text-white font-mono tracking-wide">{ev.name}</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1.5 font-mono">
+                      <p className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono">
                         <span className="text-rose-400 font-semibold">{format12Hour(ev.time)}</span>
                         {ev.days && ev.days.length > 0 && (
                           <>
                             <span>•</span>
                             <span className="text-slate-400 font-mono">{ev.days.map(d => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d]).join(", ")}</span>
+                          </>
+                        )}
+                        {ev.autoTransferEnabled && (
+                          <>
+                            <span>•</span>
+                            <span className="text-emerald-400 font-semibold text-[10px] bg-emerald-950/25 px-1.5 py-0.5 rounded border border-emerald-900/30 flex items-center gap-1">
+                              ⚡ Transfer {ev.autoTransferDelayMins === 0 ? "Immediate" : `+${ev.autoTransferDelayMins}m`}
+                            </span>
                           </>
                         )}
                       </p>
@@ -1336,6 +1388,36 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Event Auto-Transfer Overrides */}
+              <div className="flex flex-col gap-2 mt-2 border-t border-rose-950/10 pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono uppercase text-slate-500 font-semibold">Event Auto Transfer:</span>
+                  <label className="text-[10px] text-slate-400 font-mono cursor-pointer flex items-center gap-1.5">
+                    <input 
+                      type="checkbox"
+                      checked={newEventAutoTransfer}
+                      onChange={e => setNewEventAutoTransfer(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded text-rose-600 focus:ring-rose-500/30 bg-[#07090F] border-slate-800 cursor-pointer"
+                    />
+                    Enable for this Event
+                  </label>
+                </div>
+
+                {newEventAutoTransfer && (
+                  <div className="flex items-center justify-between gap-4 mt-1 bg-[#07090F]/40 p-2.5 rounded-xl border border-slate-800/40">
+                    <span className="text-[9px] font-mono text-slate-400">Delay (Minutes after event start):</span>
+                    <input 
+                      type="number"
+                      min="0"
+                      max="60"
+                      value={newEventAutoTransferDelayMins}
+                      onChange={e => setNewEventAutoTransferDelayMins(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                      className="bg-[#07090F] border border-slate-800 text-slate-300 text-[11px] rounded-lg px-2 py-1 outline-none w-16 text-center font-mono"
+                    />
+                  </div>
+                )}
+              </div>
             </form>
           </div>
 

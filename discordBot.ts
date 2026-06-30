@@ -61,6 +61,7 @@ if (ffmpeg) {
 
 export let client: Client | null = null;
 export let client2: Client | null = null;
+export let activeSettings: DiscordBotSettings | null = null;
 const activeGuildIds = new Set<string>();
 let lastAudioPlayTime = 0;
 
@@ -569,6 +570,7 @@ export interface DiscordBotSettings {
   warningAudioVolume?: number;
   bot2ChannelId?: string;
   autoTransferAtStart?: boolean;
+  autoTransferDelayMins?: number;
 }
 
 function registerSlashCommands(clientInst: Client) {
@@ -689,7 +691,8 @@ export async function initDiscordBot(
         preCacheSpeechSounds().catch(err => {
           debugLog(`Pre-caching error (non-fatal): ${err.message}`);
         });
-        startScheduleLoop(globalSchedule, globalSettings);
+        activeSettings = globalSettings;
+        startScheduleLoop(1, globalSchedule, globalSettings);
 
         try {
           registerSlashCommands(client!);
@@ -884,7 +887,8 @@ export async function initDiscordBot2(
       } catch (err: any) {
         debugLog(`Error registering slash commands for bot 2: ${err.message}`);
       }
-      startScheduleLoop(globalSchedule, globalSettings);
+      activeSettings = globalSettings;
+      startScheduleLoop(2, globalSchedule, globalSettings);
       resolve();
     });
 
@@ -919,20 +923,74 @@ function getAudioUrl(text: string) {
 }
 
 export function getAvailableVoiceChannels() {
-  if (!client) return [];
   const channels: { id: string; name: string; guildName: string }[] = [];
-  client.guilds.cache.forEach(guild => {
-    guild.channels.cache.forEach(channel => {
-      if (channel.type === ChannelType.GuildVoice) {
-        channels.push({
-          id: channel.id,
-          name: channel.name,
-          guildName: guild.name,
-        });
-      }
+  const addedIds = new Set<string>();
+
+  if (client) {
+    client.guilds.cache.forEach(guild => {
+      guild.channels.cache.forEach(channel => {
+        if (channel.type === ChannelType.GuildVoice) {
+          if (!addedIds.has(channel.id)) {
+            addedIds.add(channel.id);
+            channels.push({
+              id: channel.id,
+              name: channel.name,
+              guildName: guild.name,
+            });
+          }
+        }
+      });
     });
-  });
+  }
+
+  if (client2) {
+    client2.guilds.cache.forEach(guild => {
+      guild.channels.cache.forEach(channel => {
+        if (channel.type === ChannelType.GuildVoice) {
+          if (!addedIds.has(channel.id)) {
+            addedIds.add(channel.id);
+            channels.push({
+              id: channel.id,
+              name: channel.name,
+              guildName: guild.name,
+            });
+          }
+        }
+      });
+    });
+  }
+
   return channels;
+}
+
+function numberToEnglishWords(num: number): string {
+  if (num === 0) return "zero";
+  const ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  
+  const convertLessThanThousand = (n: number): string => {
+    if (n < 20) return ones[n];
+    if (n < 100) {
+      return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? " " + ones[n % 10] : "");
+    }
+    return ones[Math.floor(n / 100)] + " hundred" + (n % 100 !== 0 ? " " + convertLessThanThousand(n % 100) : "");
+  };
+
+  if (num < 1000) return convertLessThanThousand(num);
+  
+  const thousands = Math.floor(num / 1000);
+  const remainder = num % 1000;
+  return convertLessThanThousand(thousands) + " thousand" + (remainder !== 0 ? " " + convertLessThanThousand(remainder) : "");
+}
+
+function replaceNumbersWithEnglishWords(text: string): string {
+  return text.replace(/\b\d+\b/g, (match) => {
+    const num = parseInt(match, 10);
+    if (!isNaN(num) && num >= 0 && num <= 99999) {
+      return numberToEnglishWords(num);
+    }
+    return match;
+  });
 }
 
 function isTaglishOrTagalog(text: string): boolean {
@@ -971,9 +1029,13 @@ function isTaglishOrTagalog(text: string): boolean {
 
 function applyPhonetics(text: string, lang: string): string {
   let mapped = text;
-  // Laughing phonetics globally
-  mapped = mapped.replace(/\b(ha){2,}h?\b/gi, "ha ha ha ha ha ha");
-  mapped = mapped.replace(/\b(he){2,}h?\b/gi, "hehe hehe hehe");
+  
+  // Replace percentage symbol globally
+  mapped = mapped.replace(/%/g, " percent");
+
+  // Laughing phonetics globally - reduced to "HAHA"
+  mapped = mapped.replace(/\b(ha){2,}h?\b/gi, "HAHA");
+  mapped = mapped.replace(/\b(he){2,}h?\b/gi, "hehe");
 
   // Specific user/nickname phonetics
   mapped = mapped.replace(/\bla{2,}ns\b/gi, "LANCEEEEEEE");
@@ -985,6 +1047,9 @@ function applyPhonetics(text: string, lang: string): string {
     mapped = mapped.replace(/\bulol\b/gi, "u lol");
     mapped = mapped.replace(/\bpucha\b/gi, "pu tsha");
     mapped = mapped.replace(/\bbobo\b/gi, "bo bo");
+    
+    // Read numbers as English words in Tagalog voice
+    mapped = replaceNumbersWithEnglishWords(mapped);
   }
   return mapped;
 }
@@ -1004,7 +1069,7 @@ export async function testWarningSound(channelId: string, fileName: string, volu
 }
 
 export async function playAudioInVoiceChannels(text: string, channelIds: string[], lang = 'en', disableAutoDetect = false) {
-  if (!client || !channelIds || channelIds.length === 0) {
+  if (!channelIds || channelIds.length === 0) {
     // Fallback to process.env if none specified
     const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
     if (fallbackId) channelIds = [fallbackId];
@@ -1063,39 +1128,61 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
 
   for (const channelId of channelIds) {
     try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || !(channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
-        debugLog(`Channel with ID ${channelId} is not a valid voice channel.`);
+      // Determine which client and group key to use
+      let selectedClient: Client | null = null;
+      let group: string | undefined = undefined;
+
+      const bot2ChId = activeSettings?.bot2ChannelId;
+
+      if (client2 && client2.isReady() && channelId === bot2ChId) {
+        selectedClient = client2;
+        group = "bot2";
+      } else if (client && client.isReady()) {
+        selectedClient = client;
+        group = undefined;
+      } else if (client2 && client2.isReady()) {
+        selectedClient = client2;
+        group = "bot2";
+      }
+
+      if (!selectedClient) {
+        debugLog(`No ready Discord client found to play audio in channel ${channelId}`);
         continue;
       }
 
-      const connection = getOrCreateVoiceConnection(channel);
+      const channel = await selectedClient.channels.fetch(channelId);
+      if (!channel || !(channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+        debugLog(`Channel with ID ${channelId} is not a valid voice channel for the selected client.`);
+        continue;
+      }
+
+      const connection = getOrCreateVoiceConnection(channel, group);
       const isReady = await ensureVoiceConnectionReady(connection, channel);
       if (!isReady) {
         continue;
       }
 
       const guildId = channel.guild.id;
-      const player = getOrCreateGuildPlayer(guildId, connection);
+      const connectionKey = group ? `${guildId}_${group}` : guildId;
+      const player = getOrCreateGuildPlayer(connectionKey, connection);
       
       const createResource = () => {
         debugLog(`Streaming buffered audio directly in-memory to persistent voice player.`);
-        // We recreate the stream inside the closure so it reads from the start each time it queues
         const stream = Readable.from(audioBuffer);
         return createAudioResource(stream, {
           inputType: StreamType.Arbitrary
         });
       };
       
-      const queue = guildAudioQueues.get(guildId) || [];
+      const queue = guildAudioQueues.get(connectionKey) || [];
       queue.push({ createResource });
-      guildAudioQueues.set(guildId, queue);
+      guildAudioQueues.set(connectionKey, queue);
       
       lastAudioPlayTime = Date.now();
-      debugLog(`Play queued on persistent player in channel: ${channel.name}`);
+      debugLog(`Play queued on persistent player for client group "${group || 'bot1'}" in channel: ${channel.name}`);
       
-      if (!guildIsPlaying.get(guildId)) {
-        playNext(guildId, player, connection);
+      if (!guildIsPlaying.get(connectionKey)) {
+        playNext(connectionKey, player, connection);
       }
     } catch (error: any) {
       debugLog(`Failed during execution of playAudio in channel ${channelId}: ${error.message}`);
@@ -1149,20 +1236,42 @@ function getTzOffsetMs(timeZone: string, date: Date = new Date()): number {
   }
 }
 
-let scheduleInterval: any;
+let scheduleInterval1: any = null;
+let scheduleInterval2: any = null;
 
 // Evaluate events every second
 function startScheduleLoop(
+  botNum: 1 | 2,
   globalSchedule: { events: ScheduledEvent[] },
   globalSettings: DiscordBotSettings
 ) {
-  if (scheduleInterval) clearInterval(scheduleInterval);
+  if (botNum === 1) {
+    if (scheduleInterval1) clearInterval(scheduleInterval1);
+  } else {
+    if (scheduleInterval2) clearInterval(scheduleInterval2);
+  }
   
   let lastAutoJoinTime = 0;
   const spokenMilestones = new Map<string, Set<string>>();
+  const pendingTransfers = new Map<string, { runTime: number; channelId: string }>();
 
-  scheduleInterval = setInterval(() => {
+  const interval = setInterval(() => {
     const now = Date.now();
+
+    // Process delayed member transfers
+    for (const [occurrenceId, task] of pendingTransfers.entries()) {
+      if (now >= task.runTime) {
+        pendingTransfers.delete(occurrenceId);
+        debugLog(`Executing delayed automatic member transfer to channel: ${task.channelId}`);
+        const activeClient = client || client2;
+        if (activeClient && activeClient.isReady()) {
+          activeClient.guilds.cache.forEach(async guild => {
+            await transferVoiceMembers(guild, task.channelId);
+          });
+        }
+      }
+    }
+
     const events = globalSchedule.events;
     const tz = globalSettings.timezone || 'UTC';
     const offsetMs = getTzOffsetMs(tz, new Date(now));
@@ -1329,6 +1438,37 @@ function startScheduleLoop(
     const bot2Chs = globalSettings.bot2ChannelId ? [globalSettings.bot2ChannelId] : [];
     const mergedChs = Array.from(new Set([...targetChannels, ...bot2Chs]));
 
+    const triggerAutoTransfer = () => {
+      const isEnabled = nextEvent.autoTransferEnabled !== undefined
+        ? nextEvent.autoTransferEnabled
+        : globalSettings.autoTransferAtStart;
+
+      if (isEnabled) {
+        const delayMins = nextEvent.autoTransferDelayMins !== undefined
+          ? nextEvent.autoTransferDelayMins
+          : (typeof globalSettings.autoTransferDelayMins === 'number' ? globalSettings.autoTransferDelayMins : 0);
+
+        const targetChId = targetChannels[0] || globalSettings.bot2ChannelId;
+        if (targetChId) {
+          if (delayMins <= 0) {
+            debugLog(`Executing immediate automatic member transfer at T-0s to channel: ${targetChId}`);
+            const activeClient = client || client2;
+            if (activeClient && activeClient.isReady()) {
+              activeClient.guilds.cache.forEach(async guild => {
+                await transferVoiceMembers(guild, targetChId);
+              });
+            }
+          } else {
+            debugLog(`Scheduling automatic member transfer to channel: ${targetChId} in ${delayMins} minute(s)`);
+            pendingTransfers.set(occurrenceId, {
+              runTime: now + (delayMins * 60000),
+              channelId: targetChId
+            });
+          }
+        }
+      }
+    };
+
     if (!spokenMilestones.has(occurrenceId)) {
       spokenMilestones.set(occurrenceId, new Set<string>());
       
@@ -1412,19 +1552,8 @@ function startScheduleLoop(
             playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
           }
 
-          // Handle auto-transfer at start if enabled!
-          if (globalSettings.autoTransferAtStart) {
-            debugLog(`Executing automatic member transfer at T-0s to target channels.`);
-            const activeClient = client || client2;
-            if (activeClient && activeClient.isReady()) {
-              activeClient.guilds.cache.forEach(async guild => {
-                const targetChId = targetChannels[0] || (globalSettings.bot2ChannelId);
-                if (targetChId) {
-                  await transferVoiceMembers(guild, targetChId);
-                }
-              });
-            }
-          }
+          // Handle auto-transfer if enabled!
+          triggerAutoTransfer();
 
           debugLog(`Spoke starting-now milestone: ${milestoneKey} for ${nextEvent.name}`);
         }
@@ -1436,15 +1565,29 @@ function startScheduleLoop(
           milestones.add(milestoneKey);
           // Fallback: TTS on Bot 1 only
           playAudioInVoiceChannels(`${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
+          
+          // Handle auto-transfer if enabled!
+          triggerAutoTransfer();
+          
           debugLog(`Spoke starting-now milestone (no countdown): ${milestoneKey} for ${nextEvent.name}`);
         }
       }
     }
   }, 1000);
+
+  if (botNum === 1) {
+    scheduleInterval1 = interval;
+  } else {
+    scheduleInterval2 = interval;
+  }
 }
 
 export function stopDiscordBot() {
   debugLog("Manual token disengagement triggered: Stopping and destroying all active voice connections...");
+  if (scheduleInterval1) {
+    clearInterval(scheduleInterval1);
+    scheduleInterval1 = null;
+  }
   for (const connectionKey of activeGuildIds) {
     if (!connectionKey.endsWith("_bot2")) {
       try {
@@ -1472,6 +1615,10 @@ export function stopDiscordBot() {
 
 export function stopDiscordBot2() {
   debugLog("Manual token disengagement for bot 2: Stopping and destroying all active voice connections...");
+  if (scheduleInterval2) {
+    clearInterval(scheduleInterval2);
+    scheduleInterval2 = null;
+  }
   for (const connectionKey of activeGuildIds) {
     if (connectionKey.endsWith("_bot2")) {
       try {

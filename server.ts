@@ -45,7 +45,8 @@ export const globalSettings: any = {
   warningAudioFileName: "godfather-theme-15s.mp3",
   warningAudioVolume: 100,
   bot2ChannelId: "",
-  autoTransferAtStart: false
+  autoTransferAtStart: false,
+  autoTransferDelayMins: 0
 };
 
 const PREFS_FILE = path.join(process.cwd(), '.discord-prefs.json');
@@ -139,6 +140,9 @@ async function startServer() {
     }
     if (typeof req.body.autoTransferAtStart === 'boolean') {
       globalSettings.autoTransferAtStart = req.body.autoTransferAtStart;
+    }
+    if (typeof req.body.autoTransferDelayMins === 'number') {
+      globalSettings.autoTransferDelayMins = req.body.autoTransferDelayMins;
     }
     globalSettings.timezone = "Asia/Manila";
     savePrefs();

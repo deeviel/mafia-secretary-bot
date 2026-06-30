@@ -8,6 +8,8 @@ export interface ScheduledEvent {
   enabled: boolean;
   channelIds?: string[];
   days?: number[];
+  autoTransferEnabled?: boolean;
+  autoTransferDelayMins?: number;
 }
 
 export function useSchedule(
