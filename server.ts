@@ -47,7 +47,9 @@ export const globalSettings: any = {
   warningAudioEnabled: true,
   bot2ChannelId: "",
   autoTransferAtStart: false,
-  autoTransferDelayMins: 0
+  autoTransferDelayMins: 0,
+  autoTransferType: "delay",
+  autoTransferTime: "09:20"
 };
 
 const PREFS_FILE = path.join(process.cwd(), '.discord-prefs.json');
@@ -147,6 +149,12 @@ async function startServer() {
     }
     if (typeof req.body.autoTransferDelayMins === 'number') {
       globalSettings.autoTransferDelayMins = req.body.autoTransferDelayMins;
+    }
+    if (typeof req.body.autoTransferType === 'string') {
+      globalSettings.autoTransferType = req.body.autoTransferType;
+    }
+    if (typeof req.body.autoTransferTime === 'string') {
+      globalSettings.autoTransferTime = req.body.autoTransferTime;
     }
     globalSettings.timezone = "Asia/Manila";
     savePrefs();

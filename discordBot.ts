@@ -581,6 +581,8 @@ export interface DiscordBotSettings {
   bot2ChannelId?: string;
   autoTransferAtStart?: boolean;
   autoTransferDelayMins?: number;
+  autoTransferType?: 'delay' | 'absolute';
+  autoTransferTime?: string;
 }
 
 function registerSlashCommands(clientInst: Client) {
@@ -1308,6 +1310,52 @@ function startScheduleLoop(
     const offsetMs = getTzOffsetMs(tz, new Date(now));
     const localNowDate = new Date(now + offsetMs);
 
+    // Process absolute scheduled auto transfers (e.g. 9:20pm)
+    if (botNum === 1) { // Only handle auto-transfer via Bot 1 to avoid duplicate commands
+      const curHour = localNowDate.getUTCHours();
+      const curMin = localNowDate.getUTCMinutes();
+      const curDay = localNowDate.getUTCDay();
+      const curTimeStr = `${String(curHour).padStart(2, '0')}:${String(curMin).padStart(2, '0')}`;
+      
+      events.filter((e: ScheduledEvent) => {
+        const isEnabled = e.autoTransferEnabled !== undefined ? e.autoTransferEnabled : globalSettings.autoTransferAtStart;
+        return e.enabled && isEnabled;
+      }).forEach((e: ScheduledEvent) => {
+        const type = e.autoTransferType || globalSettings.autoTransferType || 'delay';
+        const absoluteTime = type === 'absolute' ? (e.autoTransferTime || globalSettings.autoTransferTime) : null;
+        if (type === 'absolute' && absoluteTime) {
+          if (curTimeStr === absoluteTime) {
+            const runsToday = !e.days || e.days.length === 0 || e.days.includes(curDay);
+            if (runsToday) {
+              const dateStr = `${localNowDate.getUTCFullYear()}-${localNowDate.getUTCMonth() + 1}-${localNowDate.getUTCDate()}`;
+              const milestoneKey = `abs-transfer-${e.id}-${absoluteTime}-${dateStr}`;
+              
+              if (!spokenMilestones.has("absolute-transfers")) {
+                spokenMilestones.set("absolute-transfers", new Set<string>());
+              }
+              const absMilestones = spokenMilestones.get("absolute-transfers")!;
+              if (!absMilestones.has(milestoneKey)) {
+                absMilestones.add(milestoneKey);
+                
+                const targetChId = globalSettings.bot2ChannelId;
+                if (targetChId) {
+                  debugLog(`Executing scheduled absolute-time automatic member transfer for event "${e.name}" to channel: ${targetChId}`);
+                  const activeClient = client || client2;
+                  if (activeClient && activeClient.isReady()) {
+                    activeClient.guilds.cache.forEach(async guild => {
+                      await transferVoiceMembers(guild, targetChId);
+                    });
+                  }
+                } else {
+                  debugLog(`Absolute transfer triggered for event "${e.name}" but globalSettings.bot2ChannelId is not configured.`);
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
     let nextEvent: ScheduledEvent | null = null;
     let nextTime = Infinity;
 
@@ -1477,27 +1525,32 @@ function startScheduleLoop(
         : globalSettings.autoTransferAtStart;
 
       if (isEnabled) {
-        const delayMins = nextEvent.autoTransferDelayMins !== undefined
-          ? nextEvent.autoTransferDelayMins
-          : (typeof globalSettings.autoTransferDelayMins === 'number' ? globalSettings.autoTransferDelayMins : 0);
+        const type = nextEvent.autoTransferType || globalSettings.autoTransferType || 'delay';
+        if (type === 'delay') {
+          const delayMins = nextEvent.autoTransferDelayMins !== undefined
+            ? nextEvent.autoTransferDelayMins
+            : (typeof globalSettings.autoTransferDelayMins === 'number' ? globalSettings.autoTransferDelayMins : 0);
 
-        const targetChId = globalSettings.bot2ChannelId;
-        if (targetChId) {
-          if (delayMins <= 0) {
-            debugLog(`Executing immediate automatic member transfer at T-0s to channel: ${targetChId}`);
-            const activeClient = client || client2;
-            if (activeClient && activeClient.isReady()) {
-              activeClient.guilds.cache.forEach(async guild => {
-                await transferVoiceMembers(guild, targetChId);
+          const targetChId = globalSettings.bot2ChannelId;
+          if (targetChId) {
+            if (delayMins <= 0) {
+              debugLog(`Executing immediate automatic member transfer at T-0s to channel: ${targetChId}`);
+              const activeClient = client || client2;
+              if (activeClient && activeClient.isReady()) {
+                activeClient.guilds.cache.forEach(async guild => {
+                  await transferVoiceMembers(guild, targetChId);
+                });
+              }
+            } else {
+              debugLog(`Scheduling automatic member transfer to channel: ${targetChId} in ${delayMins} minute(s)`);
+              pendingTransfers.set(occurrenceId, {
+                runTime: now + (delayMins * 60000),
+                channelId: targetChId
               });
             }
-          } else {
-            debugLog(`Scheduling automatic member transfer to channel: ${targetChId} in ${delayMins} minute(s)`);
-            pendingTransfers.set(occurrenceId, {
-              runTime: now + (delayMins * 60000),
-              channelId: targetChId
-            });
           }
+        } else {
+          debugLog(`Skipping T-0s triggerAutoTransfer for ${nextEvent!.name} because absolute-time transfer is configured.`);
         }
       }
     };

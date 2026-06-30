@@ -11,6 +11,8 @@ export interface ScheduledEvent {
   days?: number[];
   autoTransferEnabled?: boolean;
   autoTransferDelayMins?: number;
+  autoTransferType?: 'delay' | 'absolute';
+  autoTransferTime?: string; // "HH:mm" in 24h format
 }
 
 export function useSchedule(
