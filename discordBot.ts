@@ -59,7 +59,8 @@ if (ffmpeg) {
   debugLog("FFMPEG-STATIC was not found!");
 }
 
-let client: Client | null = null;
+export let client: Client | null = null;
+export let client2: Client | null = null;
 const activeGuildIds = new Set<string>();
 let lastAudioPlayTime = 0;
 
@@ -87,9 +88,10 @@ async function resolveMentions(text: string, guild: any): Promise<string> {
     }
     if (name === "someone") {
       try {
-        let user = client?.users.cache.get(userId);
+        const activeClient = client || client2;
+        let user = activeClient?.users.cache.get(userId);
         if (!user) {
-          user = await client?.users.fetch(userId).catch(() => null);
+          user = await activeClient?.users.fetch(userId).catch(() => null);
         }
         if (user) {
           name = user.displayName || user.username;
@@ -140,7 +142,8 @@ async function resolveMentions(text: string, guild: any): Promise<string> {
     }
     if (name === "a channel") {
       try {
-        const globalChannel = client?.channels.cache.get(channelId) || await client?.channels.fetch(channelId).catch(() => null);
+        const activeClient = client || client2;
+        const globalChannel = activeClient?.channels.cache.get(channelId) || await activeClient?.channels.fetch(channelId).catch(() => null);
         if (globalChannel && 'name' in globalChannel) {
           name = (globalChannel as any).name;
         }
@@ -152,16 +155,17 @@ async function resolveMentions(text: string, guild: any): Promise<string> {
   return resolved;
 }
 
-export function getOrCreateVoiceConnection(channel: any): any {
+export function getOrCreateVoiceConnection(channel: any, group?: string): any {
   const guildId = channel.guild.id;
-  activeGuildIds.add(guildId);
-  let connection = getVoiceConnection(guildId);
+  const connectionKey = group ? `${guildId}_${group}` : guildId;
+  activeGuildIds.add(connectionKey);
+  let connection = getVoiceConnection(guildId, group);
   
   // If there's an existing voice connection but it's in a broken state, destroy it first so we can rebuild cleanly
   if (connection) {
     const status = connection.state.status;
     if (status === VoiceConnectionStatus.Disconnected || status === VoiceConnectionStatus.Destroyed) {
-      debugLog(`Existing connection in guild ${guildId} is ${status}. Destroying to reconnect cleanly.`);
+      debugLog(`Existing connection in guild ${guildId} (group: ${group || 'default'}) is ${status}. Destroying to reconnect cleanly.`);
       try {
         connection.destroy();
       } catch (e) {}
@@ -176,13 +180,14 @@ export function getOrCreateVoiceConnection(channel: any): any {
   }
 
   if (!connection) {
-    debugLog(`Connecting to voice channel: "${channel.name}" in guild "${channel.guild.name}"...`);
+    debugLog(`Connecting to voice channel: "${channel.name}" in guild "${channel.guild.name}" with group: "${group || 'default'}"...`);
     connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: guildId,
       adapterCreator: channel.guild.voiceAdapterCreator as any,
       selfDeaf: true,
       selfMute: false,
+      group: group
     });
   }
 
@@ -436,8 +441,59 @@ export async function preCacheSpeechSounds(): Promise<void> {
   }
 }
 
+async function playLocalFileInChannelForClient(
+  clientInst: Client,
+  channel: any,
+  filePath: string,
+  group?: string,
+  options?: { volume?: number, maxDurationSec?: number }
+) {
+  const connection = getOrCreateVoiceConnection(channel, group);
+  const isReady = await ensureVoiceConnectionReady(connection, channel);
+  if (!isReady) {
+    return;
+  }
+
+  const guildId = channel.guild.id;
+  const connectionKey = group ? `${guildId}_${group}` : guildId;
+  const player = getOrCreateGuildPlayer(connectionKey, connection);
+  
+  const createResource = () => {
+    const resource = createAudioResource(filePath, {
+      inputType: StreamType.Arbitrary,
+      inlineVolume: options?.volume !== undefined
+    });
+
+    if (options?.volume !== undefined) {
+      resource.volume?.setVolume(options.volume / 100);
+    }
+    return resource;
+  };
+
+  const queue = guildAudioQueues.get(connectionKey) || [];
+  queue.push({
+    createResource,
+    onStart: (p: any) => {
+      if (options?.maxDurationSec) {
+        setTimeout(() => {
+          if (p.state.status === AudioPlayerStatus.Playing) {
+            p.stop();
+          }
+        }, options.maxDurationSec * 1000);
+      }
+    }
+  });
+  guildAudioQueues.set(connectionKey, queue);
+
+  lastAudioPlayTime = Date.now();
+  
+  if (!guildIsPlaying.get(connectionKey)) {
+    playNext(connectionKey, player, connection);
+  }
+}
+
 export async function playLocalFileInChannels(filePath: string, channelIds: string[], options?: { volume?: number, maxDurationSec?: number }) {
-  if (!client || !channelIds || channelIds.length === 0) {
+  if (channelIds.length === 0) {
     const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
     if (fallbackId) channelIds = [fallbackId];
     else return;
@@ -446,61 +502,60 @@ export async function playLocalFileInChannels(filePath: string, channelIds: stri
   debugLog(`Requested local file playback: "${filePath}" into channels: ${channelIds.join(', ')}`);
 
   for (const channelId of channelIds) {
-    try {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || channel.type !== ChannelType.GuildVoice) {
-        continue;
-      }
-
-      const connection = getOrCreateVoiceConnection(channel);
-      const isReady = await ensureVoiceConnectionReady(connection, channel);
-      if (!isReady) {
-        continue;
-      }
-
-      const guildId = channel.guild.id;
-      const player = getOrCreateGuildPlayer(guildId, connection);
-      
-      const createResource = () => {
-        const resource = createAudioResource(filePath, {
-          inputType: StreamType.Arbitrary,
-          inlineVolume: options?.volume !== undefined
-        });
-
-        if (options?.volume !== undefined) {
-          resource.volume?.setVolume(options.volume / 100);
+    // Try to play on bot 1
+    if (client && client.isReady()) {
+      try {
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+          await playLocalFileInChannelForClient(client, channel, filePath, undefined, options);
         }
-        return resource;
-      };
-
-      const queue = guildAudioQueues.get(guildId) || [];
-      queue.push({
-        createResource,
-        onStart: (p) => {
-          if (options?.maxDurationSec) {
-            setTimeout(() => {
-              if (p.state.status === AudioPlayerStatus.Playing) {
-                p.stop();
-              }
-            }, options.maxDurationSec * 1000);
-          }
-        }
-      });
-      guildAudioQueues.set(guildId, queue);
-
-      lastAudioPlayTime = Date.now();
-      
-      if (!guildIsPlaying.get(guildId)) {
-        playNext(guildId, player, connection);
+      } catch (err: any) {
+        debugLog(`Bot 1 failed to play local file in channel ${channelId}: ${err.message}`);
       }
-    } catch (error: any) {
-      debugLog(`Failed during execution of playLocalFile in channel ${channelId}: ${error.message}`);
+    }
+
+    // Try to play on bot 2
+    if (client2 && client2.isReady()) {
+      try {
+        const channel = await client2.channels.fetch(channelId).catch(() => null);
+        if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+          await playLocalFileInChannelForClient(client2, channel, filePath, 'bot2', options);
+        }
+      } catch (err: any) {
+        debugLog(`Bot 2 failed to play local file in channel ${channelId}: ${err.message}`);
+      }
     }
   }
 }
 
 export function isDiscordConnected() {
   return !!(client && client.isReady());
+}
+
+export function isDiscordConnected2() {
+  return !!(client2 && client2.isReady());
+}
+
+export async function transferVoiceMembers(guild: any, targetChannelId: string) {
+  const voiceStates = guild.voiceStates.cache;
+  let movedCount = 0;
+  let failedCount = 0;
+
+  for (const [memberId, state] of voiceStates.entries()) {
+    if (state.channelId && state.channelId !== targetChannelId) {
+      try {
+        const member = state.member || await guild.members.fetch(memberId).catch(() => null);
+        if (member) {
+          await member.voice.setChannel(targetChannelId);
+          movedCount++;
+        }
+      } catch (err: any) {
+        debugLog(`Failed to move member ${memberId}: ${err.message}`);
+        failedCount++;
+      }
+    }
+  }
+  return { movedCount, failedCount };
 }
 
 export interface DiscordBotSettings {
@@ -512,6 +567,100 @@ export interface DiscordBotSettings {
   warningAudioOffsetSec?: number;
   warningAudioFileName?: string;
   warningAudioVolume?: number;
+  bot2ChannelId?: string;
+  autoTransferAtStart?: boolean;
+}
+
+function registerSlashCommands(clientInst: Client) {
+  try {
+    const commandsToCreate = [];
+
+    if (clientInst === client) {
+      commandsToCreate.push({
+        name: 'ss',
+        description: 'Speak a message aloud into your voice channel chat/channel',
+        options: [
+          {
+            name: 'text',
+            type: 3, // String type
+            description: 'The text for Mafia Secretary to speak',
+            required: true
+          }
+        ]
+      });
+    }
+
+    commandsToCreate.push({
+      name: 'transfer',
+      description: 'Transfer all members from any voice channel to a target voice channel',
+      options: [
+        {
+          name: 'channel',
+          type: 7, // Channel type
+          description: 'The channel to move everyone to. If not specified, moves everyone to your voice channel.',
+          required: false
+        }
+      ]
+    });
+
+    clientInst.application?.commands.set(commandsToCreate).then(() => {
+      debugLog(`Successfully registered commands for bot: ${clientInst.user?.tag}`);
+    }).catch(err => {
+      debugLog(`Failed during command registration for ${clientInst.user?.tag}: ${err.message}`);
+    });
+
+    // Clear guild-level commands to prevent duplication
+    clientInst.guilds.cache.forEach(guild => {
+      guild.commands.set([]).catch(() => {});
+    });
+  } catch (err: any) {
+    debugLog(`Error registering commands: ${err.message}`);
+  }
+}
+
+async function handleTransferInteraction(interaction: any) {
+  let deferSuccess = true;
+  await interaction.deferReply().catch(err => {
+    deferSuccess = false;
+  });
+
+  try {
+    const guild = interaction.guild;
+    if (!guild) {
+      if (deferSuccess) await interaction.editReply({ content: "❌ This command can only be used in a Discord server." });
+      return;
+    }
+
+    let targetChannel = interaction.options.getChannel('channel');
+    if (!targetChannel) {
+      const member = guild.members.cache.get(interaction.user.id) || await guild.members.fetch(interaction.user.id).catch(() => null);
+      if (member?.voice?.channel) {
+        targetChannel = member.voice.channel;
+      }
+    }
+
+    if (!targetChannel || !(targetChannel.type === ChannelType.GuildVoice || targetChannel.type === ChannelType.GuildStageVoice || (typeof targetChannel.isVoiceBased === 'function' && targetChannel.isVoiceBased()))) {
+      if (deferSuccess) {
+        await interaction.editReply({ content: "❌ Please specify a valid voice channel, or join one yourself to transfer members here." });
+      }
+      return;
+    }
+
+    const { movedCount, failedCount } = await transferVoiceMembers(guild, targetChannel.id);
+
+    if (deferSuccess) {
+      if (movedCount === 0) {
+        await interaction.editReply({ content: `ℹ️ No other members found in other voice channels to transfer to **${targetChannel.name}**.` });
+      } else {
+        await interaction.editReply({ content: `✅ Successfully transferred **${movedCount}** member(s) to **${targetChannel.name}**${failedCount > 0 ? ` (${failedCount} failed)` : ''}.` });
+      }
+    }
+  } catch (err: any) {
+    debugLog(`Error executing transfer command: ${err.message}`);
+    if (deferSuccess) {
+      await interaction.editReply({ content: `❌ Failed to execute transfer: ${err.message}` });
+    }
+  }
 }
 
 export async function initDiscordBot(
@@ -542,34 +691,8 @@ export async function initDiscordBot(
         });
         startScheduleLoop(globalSchedule, globalSettings);
 
-        // Register /ss global slash commands and clear redundant guild commands to prevent duplicates
         try {
-          client?.application?.commands.create({
-            name: 'ss',
-            description: 'Speak a message aloud into your voice channel chat/channel',
-            options: [
-              {
-                name: 'text',
-                type: 3, // String type
-                description: 'The text for Mafia Secretary to speak',
-                required: true
-              }
-            ]
-          }).then(() => {
-            debugLog(`Successfully registered global slash command '/ss'`);
-          }).catch(err => {
-            debugLog(`Failed during global slash command '/ss' registration: ${err.message}`);
-          });
-
-          // Clear guild-level /ss commands so they don't double-up with the global command
-          client?.guilds.cache.forEach(guild => {
-            guild.commands.set([]).then(() => {
-              debugLog(`Cleared custom guild-level slash commands for: "${guild.name}" to prevent duplication.`);
-            }).catch(err => {
-              debugLog(`Guild-level command resetting bypassed or failed for "${guild.name}": ${err.message}`);
-            });
-          });
-
+          registerSlashCommands(client!);
         } catch (err: any) {
           debugLog(`Error cleaning up & registering slash commands: ${err.message}`);
         }
@@ -618,6 +741,8 @@ export async function initDiscordBot(
                 await interaction.editReply({ content: `❌ You must join a voice channel for Mafia Secretary to speak.` }).catch(() => {});
               }
             }
+          } else if (interaction.commandName === 'transfer') {
+            await handleTransferInteraction(interaction);
           }
         } catch (err: any) {
           debugLog(`Error processing slash interaction: ${err.message}`);
@@ -631,10 +756,26 @@ export async function initDiscordBot(
             if (!message.guild || message.author.bot) return;
 
             const content = message.content.trim();
+            const lower = content.toLowerCase();
+
+            // Match text-based transfer trigger
+            if (lower.startsWith('!transfer') || lower.startsWith('.transfer') || lower === 'transfer all here' || lower.startsWith('!transfer ')) {
+              const member = message.guild.members.cache.get(message.author.id) || await message.guild.members.fetch(message.author.id).catch(() => null);
+              const voiceChannel = member?.voice?.channel;
+              if (voiceChannel) {
+                message.react('✅').catch(() => {});
+                const { movedCount } = await transferVoiceMembers(message.guild, voiceChannel.id);
+                message.reply(`✅ Successfully transferred **${movedCount}** member(s) to **${voiceChannel.name}**!`).catch(() => {});
+              } else {
+                message.react('❌').catch(() => {});
+                message.reply(`❌ You must join a voice channel to transfer members to your location.`).catch(() => {});
+              }
+              return;
+            }
+
             let textToSpeak = '';
             
             // Match clean /ss as a fast alternate, !ss, .ss, or ss prefix-less commands
-            const lower = content.toLowerCase();
             if (lower.startsWith('ss ')) {
               textToSpeak = content.substring(3).trim();
             } else if (lower.startsWith('!ss ')) {
@@ -711,6 +852,61 @@ export async function initDiscordBot(
       throw err;
     }
   }
+}
+
+export async function initDiscordBot2(
+  globalSchedule: { events: ScheduledEvent[] },
+  globalSettings: DiscordBotSettings,
+  token?: string
+): Promise<void> {
+  const currentToken = (token || process.env.DISCORD_TOKEN_2 || '').trim();
+  // Prevent login attempt with obvious invalid or placeholder tokens
+  if (!currentToken || currentToken === 'undefined' || currentToken.length < 50 || currentToken.includes("INSERT_YOUR_DISCORD_BOT_TOKEN_HERE")) {
+    throw new Error("Invalid secondary token format.");
+  }
+
+  if (client2) {
+    client2.destroy();
+  }
+
+  return new Promise((resolve, reject) => {
+    client2 = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates
+      ]
+    });
+
+    client2.on('ready', () => {
+      debugLog(`Secondary Discord bot logged in and READY as: ${client2?.user?.tag}`);
+      try {
+        registerSlashCommands(client2!);
+      } catch (err: any) {
+        debugLog(`Error registering slash commands for bot 2: ${err.message}`);
+      }
+      startScheduleLoop(globalSchedule, globalSettings);
+      resolve();
+    });
+
+    client2.on('interactionCreate', async (interaction) => {
+      try {
+        if (!interaction.isChatInputCommand()) return;
+        if (interaction.commandName === 'transfer') {
+          await handleTransferInteraction(interaction);
+        }
+      } catch (err: any) {
+        debugLog(`Error processing slash interaction on bot 2: ${err.message}`);
+      }
+    });
+
+    client2.on('error', (err) => {
+      debugLog(`Secondary Discord client error event: ${err.message}`);
+    });
+
+    client2.login(currentToken).catch(err => {
+      reject(err);
+    });
+  });
 }
 
 // Ensure clean audio URL fetching via google-tts-api
@@ -798,6 +994,15 @@ export async function testVoice(channelId: string, lang = 'en') {
   await playAudioInVoiceChannels("This is a test message to verify the voice channel connection.", [channelId], lang, true);
 }
 
+export async function testWarningSound(channelId: string, fileName: string, volume: number) {
+  console.log(`Testing warning sound: ${fileName} on channel ${channelId} with volume ${volume}`);
+  const targetPath = path.join(process.cwd(), fileName);
+  if (!fs.existsSync(targetPath)) {
+    throw new Error(`Warning sound file ${fileName} does not exist on the server.`);
+  }
+  await playLocalFileInChannels(targetPath, [channelId], { volume, maxDurationSec: 15 });
+}
+
 export async function playAudioInVoiceChannels(text: string, channelIds: string[], lang = 'en', disableAutoDetect = false) {
   if (!client || !channelIds || channelIds.length === 0) {
     // Fallback to process.env if none specified
@@ -859,8 +1064,8 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
   for (const channelId of channelIds) {
     try {
       const channel = await client.channels.fetch(channelId);
-      if (!channel || channel.type !== ChannelType.GuildVoice) {
-        debugLog(`Channel with ID ${channelId} is not a valid guild voice channel.`);
+      if (!channel || !(channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+        debugLog(`Channel with ID ${channelId} is not a valid voice channel.`);
         continue;
       }
 
@@ -1011,55 +1216,106 @@ function startScheduleLoop(
     // Check and run auto-join every 10 seconds
     if (now - lastAutoJoinTime >= 10000) {
       lastAutoJoinTime = now;
-      let shouldBeConnected = false;
-      let targetConnectionChannels: string[] = [];
+      
+      // Bot 1 (Main Bot) Connection Logic
+      let shouldBeConnected1 = false;
+      let targetConnectionChannels1: string[] = [];
 
       if (nextEvent) {
           const warnMins = globalSettings.warnings || [];
           const maxWarn = warnMins.length > 0 ? Math.max(...warnMins) : 30;
           
           if (minsLeft <= maxWarn + 2 && minsLeft >= -5) {
-             shouldBeConnected = true;
+             shouldBeConnected1 = true;
           }
 
-          if (shouldBeConnected) {
-             targetConnectionChannels = nextEvent.channelIds || [];
-             if (targetConnectionChannels.length === 0 && process.env.DISCORD_VOICE_CHANNEL_ID) {
-                targetConnectionChannels = [process.env.DISCORD_VOICE_CHANNEL_ID];
+          if (shouldBeConnected1) {
+             targetConnectionChannels1 = nextEvent.channelIds || [];
+             if (targetConnectionChannels1.length === 0 && process.env.DISCORD_VOICE_CHANNEL_ID) {
+                targetConnectionChannels1 = [process.env.DISCORD_VOICE_CHANNEL_ID];
              }
           }
       }
 
-      // Check active voice queues
-      let hasActiveQueues = false;
-      for (const isPlay of Array.from(guildIsPlaying.values())) {
-         if (isPlay) hasActiveQueues = true;
+      // Keep bot 1 connected if active queues
+      let hasActiveQueues1 = false;
+      for (const [key, isPlay] of guildIsPlaying.entries()) {
+         if (!key.endsWith("_bot2") && isPlay) hasActiveQueues1 = true;
       }
-      if (hasActiveQueues) {
-          shouldBeConnected = true; 
-      }
-      if (now - lastAudioPlayTime < 5 * 60 * 1000) {
-          shouldBeConnected = true;
+      if (hasActiveQueues1 || (now - lastAudioPlayTime < 5 * 60 * 1000)) {
+         shouldBeConnected1 = true;
       }
 
-      if (shouldBeConnected && targetConnectionChannels.length > 0) {
-          targetConnectionChannels.forEach(channelId => {
-             client?.channels.fetch(channelId).then(async channel => {
-                 if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
-                     const connection = getOrCreateVoiceConnection(channel);
-                     await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
-                 }
-             }).catch(()=>{});
-          });
-      } else if (!shouldBeConnected && activeGuildIds.size > 0) {
-          // Disconnect all if no active triggers
-          for (const guildId of activeGuildIds) {
-             try {
-                const conn = getVoiceConnection(guildId);
-                if (conn) conn.destroy();
-             } catch(e){}
+      if (client && client.isReady()) {
+         if (shouldBeConnected1 && targetConnectionChannels1.length > 0) {
+             targetConnectionChannels1.forEach(channelId => {
+                client?.channels.fetch(channelId).then(async channel => {
+                    if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+                        const connection = getOrCreateVoiceConnection(channel);
+                        await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
+                    }
+                }).catch(()=>{});
+             });
+         } else {
+             // Disconnect Bot 1 from any guilds we joined if we shouldn't be connected
+             for (const connectionKey of activeGuildIds) {
+                if (!connectionKey.endsWith("_bot2")) {
+                   try {
+                      const conn = getVoiceConnection(connectionKey);
+                      if (conn) conn.destroy();
+                   } catch(e){}
+                   activeGuildIds.delete(connectionKey);
+                }
+             }
+         }
+      }
+
+      // Bot 2 (Secondary Bot) Connection Logic
+      let shouldBeConnected2 = false;
+      let targetConnectionChannels2: string[] = [];
+
+      if (nextEvent && globalSettings.bot2ChannelId) {
+          const warnMins = globalSettings.warnings || [];
+          const maxWarn = warnMins.length > 0 ? Math.max(...warnMins) : 30;
+          
+          // Connect starting from max warning plus 2 mins, up until exactly 5 mins after starting
+          if (minsLeft <= maxWarn + 2 && minsLeft > -5) {
+             shouldBeConnected2 = true;
+             targetConnectionChannels2 = [globalSettings.bot2ChannelId];
           }
-          activeGuildIds.clear();
+      }
+
+      let hasActiveQueues2 = false;
+      for (const [key, isPlay] of guildIsPlaying.entries()) {
+         if (key.endsWith("_bot2") && isPlay) hasActiveQueues2 = true;
+      }
+      if (hasActiveQueues2) {
+         shouldBeConnected2 = true;
+      }
+
+      if (client2 && client2.isReady()) {
+         if (shouldBeConnected2 && targetConnectionChannels2.length > 0) {
+             targetConnectionChannels2.forEach(channelId => {
+                client2?.channels.fetch(channelId).then(async channel => {
+                    if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+                        const connection = getOrCreateVoiceConnection(channel, "bot2");
+                        await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
+                    }
+                }).catch(()=>{});
+             });
+         } else {
+             // Disconnect Bot 2 from any guilds we joined if we shouldn't be connected
+             for (const connectionKey of activeGuildIds) {
+                if (connectionKey.endsWith("_bot2")) {
+                   try {
+                      const guildId = connectionKey.replace("_bot2", "");
+                      const conn = getVoiceConnection(guildId, "bot2");
+                      if (conn) conn.destroy();
+                   } catch(e){}
+                   activeGuildIds.delete(connectionKey);
+                }
+             }
+         }
       }
     }
 
@@ -1070,6 +1326,8 @@ function startScheduleLoop(
     const eventId = nextEvent.id;
     const occurrenceId = `${eventId}_${nextTime}`;
     const targetChannels = nextEvent.channelIds || [];
+    const bot2Chs = globalSettings.bot2ChannelId ? [globalSettings.bot2ChannelId] : [];
+    const mergedChs = Array.from(new Set([...targetChannels, ...bot2Chs]));
 
     if (!spokenMilestones.has(occurrenceId)) {
       spokenMilestones.set(occurrenceId, new Set<string>());
@@ -1090,6 +1348,7 @@ function startScheduleLoop(
       const milestoneKey = `warn-${warnMin}`;
       if (minsLeft === warnMin && !milestones.has(milestoneKey) && msLeft > 0) {
         milestones.add(milestoneKey);
+        // Play TTS only on Bot 1 (to prevent redundant voices/conflicts)
         playAudioInVoiceChannels(`Reminder: ${nextEvent!.name} starts in ${warnMin} minute${warnMin > 1 ? 's' : ''}.`, targetChannels, globalSettings.voiceLang, true);
         debugLog(`Spoke warning milestone: ${milestoneKey} for ${nextEvent!.name}`);
       }
@@ -1105,12 +1364,13 @@ function startScheduleLoop(
           const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
           const customAudioPath = path.join(process.cwd(), customFileName);
           if (fs.existsSync(customAudioPath)) {
-            playLocalFileInChannels(customAudioPath, targetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 });
+            // Play custom warning audio on BOTH bots (using mergedChs)
+            playLocalFileInChannels(customAudioPath, mergedChs, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 });
             debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name} with volume ${globalSettings.warningAudioVolume || 100}% playing for max 10s`);
           } else {
             const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
             if (fs.existsSync(fallbackPath)) {
-              playLocalFileInChannels(fallbackPath, targetChannels, { volume: 100, maxDurationSec: 10 });
+              playLocalFileInChannels(fallbackPath, mergedChs, { volume: 100, maxDurationSec: 10 });
               debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name}`);
             } else {
               debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);
@@ -1123,8 +1383,10 @@ function startScheduleLoop(
           milestones.add(milestoneKey);
           const cachedFile = cachedSpeechPaths.get(secsLeft.toString());
           if (cachedFile && fs.existsSync(cachedFile)) {
-            playLocalFileInChannels(cachedFile, targetChannels);
+            // Play cached countdown MP3 on BOTH bots
+            playLocalFileInChannels(cachedFile, mergedChs);
           } else {
+            // Fallback: TTS only on Bot 1
             playAudioInVoiceChannels(secsLeft.toString(), targetChannels, globalSettings.voiceLang, true);
           }
           debugLog(`Spoke countdown milestone: ${milestoneKey} for ${nextEvent.name}`);
@@ -1139,13 +1401,31 @@ function startScheduleLoop(
           const clearCommsFile = cachedSpeechPaths.get('clear-comms');
           
           if (isDefaultText && clearCommsFile && fs.existsSync(clearCommsFile)) {
-            playLocalFileInChannels(clearCommsFile, targetChannels);
+            // Play clear comms on BOTH bots
+            playLocalFileInChannels(clearCommsFile, mergedChs);
             setTimeout(() => {
+              // TTS on Bot 1 only
               playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
             }, 2600);
           } else {
+            // TTS on Bot 1 only
             playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
           }
+
+          // Handle auto-transfer at start if enabled!
+          if (globalSettings.autoTransferAtStart) {
+            debugLog(`Executing automatic member transfer at T-0s to target channels.`);
+            const activeClient = client || client2;
+            if (activeClient && activeClient.isReady()) {
+              activeClient.guilds.cache.forEach(async guild => {
+                const targetChId = targetChannels[0] || (globalSettings.bot2ChannelId);
+                if (targetChId) {
+                  await transferVoiceMembers(guild, targetChId);
+                }
+              });
+            }
+          }
+
           debugLog(`Spoke starting-now milestone: ${milestoneKey} for ${nextEvent.name}`);
         }
       }
@@ -1154,6 +1434,7 @@ function startScheduleLoop(
         const milestoneKey = 'countdown-0';
         if (!milestones.has(milestoneKey)) {
           milestones.add(milestoneKey);
+          // Fallback: TTS on Bot 1 only
           playAudioInVoiceChannels(`${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
           debugLog(`Spoke starting-now milestone (no countdown): ${milestoneKey} for ${nextEvent.name}`);
         }
@@ -1164,18 +1445,19 @@ function startScheduleLoop(
 
 export function stopDiscordBot() {
   debugLog("Manual token disengagement triggered: Stopping and destroying all active voice connections...");
-  for (const guildId of activeGuildIds) {
-    try {
-      const connection = getVoiceConnection(guildId);
-      if (connection) {
-        debugLog(`Destroying active voice connection in guild: ${guildId}`);
-        connection.destroy();
+  for (const connectionKey of activeGuildIds) {
+    if (!connectionKey.endsWith("_bot2")) {
+      try {
+        const connection = getVoiceConnection(connectionKey);
+        if (connection) {
+          debugLog(`Destroying active voice connection in guild: ${connectionKey}`);
+          connection.destroy();
+        }
+      } catch (e: any) {
+        debugLog(`Error destroying connection for guild ${connectionKey}: ${e.message}`);
       }
-    } catch (e: any) {
-      debugLog(`Error destroying connection for guild ${guildId}: ${e.message}`);
     }
   }
-  activeGuildIds.clear();
 
   if (client) {
     debugLog("Manual token disengagement triggered: Stopping and destroying current Discord Bot client instance...");
@@ -1185,5 +1467,34 @@ export function stopDiscordBot() {
       debugLog(`Error while destroying client: ${e.message}`);
     }
     client = null;
+  }
+}
+
+export function stopDiscordBot2() {
+  debugLog("Manual token disengagement for bot 2: Stopping and destroying all active voice connections...");
+  for (const connectionKey of activeGuildIds) {
+    if (connectionKey.endsWith("_bot2")) {
+      try {
+        const guildId = connectionKey.replace("_bot2", "");
+        const connection = getVoiceConnection(guildId, "bot2");
+        if (connection) {
+          debugLog(`Destroying active voice connection for bot 2 in guild: ${guildId}`);
+          connection.destroy();
+        }
+      } catch (e: any) {
+        debugLog(`Error destroying bot 2 connection: ${e.message}`);
+      }
+      activeGuildIds.delete(connectionKey);
+    }
+  }
+
+  if (client2) {
+    debugLog("Manual token disengagement for bot 2: Stopping and destroying secondary Discord Bot client instance...");
+    try {
+      client2.destroy();
+    } catch (e: any) {
+      debugLog(`Error while destroying client2: ${e.message}`);
+    }
+    client2 = null;
   }
 }

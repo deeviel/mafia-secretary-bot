@@ -12,6 +12,15 @@ import { speech, VoiceOption } from './lib/speech';
 
 let tzList: string[] = ['Asia/Manila', 'UTC'];
 
+const DISCORD_VOICE_ACCENTS = [
+  { value: 'en-US', label: '🇺🇸 US English (United States)' },
+  { value: 'en-GB', label: '🇬🇧 UK English (United Kingdom)' },
+  { value: 'en-AU', label: '🇦🇺 AU English (Australia)' },
+  { value: 'en-CA', label: '🇨🇦 CA English (Canada)' },
+  { value: 'en-IN', label: '🇮🇳 IN English (India)' },
+  { value: 'tl', label: '🇵🇭 Tagalog / Filipino (Philippines)' }
+];
+
 const format12Hour = (timeStr: string) => {
   if (!timeStr) return '';
   const [hourStr, minStr] = timeStr.split(':');
@@ -40,6 +49,7 @@ export default function App() {
   // Voice settings
   const [voices, setVoices] = useState<VoiceOption[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<string>('');
+  const [voiceLang, setVoiceLang] = useState<string>('en');
   
   // Live Manila clock states
   const [liveManilaTime, setLiveManilaTime] = useState<string>('--:--:--');
@@ -90,6 +100,15 @@ export default function App() {
   const [discordToken, setDiscordToken] = useState('');
   const [isDiscordConnected, setIsDiscordConnected] = useState(false);
   const [isDiscordConnecting, setIsDiscordConnecting] = useState(false);
+
+  // Discord connection 2
+  const [discordToken2, setDiscordToken2] = useState('');
+  const [isDiscordConnected2, setIsDiscordConnected2] = useState(false);
+  const [isDiscordConnecting2, setIsDiscordConnecting2] = useState(false);
+
+  // Additional settings
+  const [bot2ChannelId, setBot2ChannelId] = useState('');
+  const [autoTransferAtStart, setAutoTransferAtStart] = useState(false);
   
   // Discord channels
   const [availableChannels, setAvailableChannels] = useState<{id:string, name:string, guildName:string}[]>([]);
@@ -114,7 +133,8 @@ export default function App() {
        .then(data => {
           if (!data) return;
           setIsDiscordConnected(data.connected);
-          if (data.connected) fetchDiscordChannels();
+          setIsDiscordConnected2(data.connected2);
+          if (data.connected || data.connected2) fetchDiscordChannels();
        })
        .catch(err => console.error(err));
   };
@@ -173,10 +193,13 @@ export default function App() {
         if (!data) return;
         if (data.warnings) setWarnings(data.warnings);
         if (typeof data.voiceCountdown === 'boolean') setVoiceCountdown(data.voiceCountdown);
+        if (typeof data.voiceLang === 'string') setVoiceLang(data.voiceLang);
         if (typeof data.voiceStartText === 'string') setVoiceStartText(data.voiceStartText);
         if (typeof data.warningAudioOffsetSec === 'number') setWarningAudioOffsetSec(data.warningAudioOffsetSec);
         if (typeof data.warningAudioFileName === 'string') setWarningAudioFileName(data.warningAudioFileName);
         if (typeof data.warningAudioVolume === 'number') setWarningAudioVolume(data.warningAudioVolume);
+        if (typeof data.bot2ChannelId === 'string') setBot2ChannelId(data.bot2ChannelId);
+        if (typeof data.autoTransferAtStart === 'boolean') setAutoTransferAtStart(data.autoTransferAtStart);
         setTimezone("Asia/Manila");
         // Ensure backend setting is set to Asia/Manila too
         fetch('/api/settings', {
@@ -214,6 +237,26 @@ export default function App() {
     };
   }, []);
 
+  // Synchronize browser voice simulation when backend voice language changes
+  useEffect(() => {
+    if (voices.length === 0) return;
+    
+    // Check if we already have a selected voice that matches the lang
+    const currentVoice = voices.find(v => v.uri === selectedVoice);
+    if (currentVoice && currentVoice.lang.toLowerCase().replace('_', '-').startsWith(voiceLang.toLowerCase().replace('_', '-').split('-')[0])) {
+      return; // Already matches
+    }
+
+    // Try to find a matching voice
+    const normalizedLang = voiceLang.toLowerCase().replace('_', '-').split('-')[0];
+    const bestMatch = voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith(normalizedLang)) || voices[0];
+    
+    if (bestMatch && bestMatch.uri !== selectedVoice) {
+      speech.setVoiceByUri(bestMatch.uri);
+      setSelectedVoice(bestMatch.uri);
+    }
+  }, [voiceLang, voices]);
+
   const syncSchedule = (updatedEvents: ScheduledEvent[]) => {
     setEvents(updatedEvents);
     fetch('/api/schedule', {
@@ -230,16 +273,23 @@ export default function App() {
     newVoiceStartText?: string,
     newWarningOffset?: number,
     newWarningFile?: string,
-    newWarningVolume?: number
+    newWarningVolume?: number,
+    newBot2ChannelId?: string,
+    newAutoTransferAtStart?: boolean
   ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
+    if (newVoiceLang !== undefined) setVoiceLang(newVoiceLang);
     if (newVoiceStartText !== undefined) setVoiceStartText(newVoiceStartText);
     if (newWarningOffset !== undefined) setWarningAudioOffsetSec(newWarningOffset);
     if (newWarningFile !== undefined) setWarningAudioFileName(newWarningFile);
     if (newWarningVolume !== undefined) setWarningAudioVolume(newWarningVolume);
+    if (newBot2ChannelId !== undefined) setBot2ChannelId(newBot2ChannelId);
+    if (newAutoTransferAtStart !== undefined) setAutoTransferAtStart(newAutoTransferAtStart);
 
-    const lang = newVoiceLang || voices.find(v => v.uri === selectedVoice)?.lang || 'en';
+    const lang = newVoiceLang !== undefined ? newVoiceLang : voiceLang;
+    const bot2Ch = newBot2ChannelId !== undefined ? newBot2ChannelId : bot2ChannelId;
+    const autoTrans = newAutoTransferAtStart !== undefined ? newAutoTransferAtStart : autoTransferAtStart;
     
     const postBody = {
       warnings: updatedWarnings,
@@ -249,7 +299,9 @@ export default function App() {
       voiceStartText: newVoiceStartText !== undefined ? newVoiceStartText : voiceStartText,
       warningAudioOffsetSec: newWarningOffset !== undefined ? newWarningOffset : warningAudioOffsetSec,
       warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName,
-      warningAudioVolume: newWarningVolume !== undefined ? newWarningVolume : warningAudioVolume
+      warningAudioVolume: newWarningVolume !== undefined ? newWarningVolume : warningAudioVolume,
+      bot2ChannelId: bot2Ch,
+      autoTransferAtStart: autoTrans
     };
 
     fetch('/api/settings', {
@@ -294,7 +346,7 @@ export default function App() {
     })
     .catch(err => {
       console.error(err);
-      showToast(`Failed to connect: ${err.message}. If the server is restarting, please wait a moment.`, 'error');
+      showToast(`Failed to connect Bot 1: ${err.message}. If the server is restarting, please wait a moment.`, 'error');
     })
     .finally(() => setIsDiscordConnecting(false));
   };
@@ -305,17 +357,63 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' }
     })
     .then(async res => {
-      if (!res.ok) throw new Error("Failed to disconnect bot");
+      if (!res.ok) throw new Error("Failed to disconnect Bot 1");
       const data = await res.json();
       if (data && data.success) {
         setIsDiscordConnected(false);
-        setAvailableChannels([]);
-        showToast("Discord bot stopped in preview environment to prevent token conflicts.", "success");
+        showToast("Discord Bot 1 stopped successfully.", "success");
       }
     })
     .catch(err => {
       console.error(err);
-      showToast("Error during bot disconnection: " + String(err), "error");
+      showToast("Error during Bot 1 disconnection: " + String(err), "error");
+    });
+  };
+
+  const handleDiscordConnect2 = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!discordToken2) return;
+    setIsDiscordConnecting2(true);
+    fetch('/api/discord/connect2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: discordToken2 })
+    })
+    .then(async res => {
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { return null; }
+        if (!res.ok) throw new Error(data?.error || "Failed to connect Bot 2");
+        return data;
+     })
+    .then(data => {
+       if (data && data.success) {
+          fetchDiscordStatus();
+       }
+    })
+    .catch(err => {
+      console.error(err);
+      showToast(`Failed to connect Bot 2: ${err.message}. If the server is restarting, please wait a moment.`, 'error');
+    })
+    .finally(() => setIsDiscordConnecting2(false));
+  };
+
+  const handleDiscordDisconnect2 = () => {
+    fetch('/api/discord/disconnect2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    .then(async res => {
+      if (!res.ok) throw new Error("Failed to disconnect Bot 2");
+      const data = await res.json();
+      if (data && data.success) {
+        setIsDiscordConnected2(false);
+        showToast("Discord Bot 2 stopped successfully.", "success");
+      }
+    })
+    .catch(err => {
+      console.error(err);
+      showToast("Error during Bot 2 disconnection: " + String(err), "error");
     });
   };
 
@@ -544,103 +642,214 @@ export default function App() {
             
             <div className="flex items-center gap-2 mb-4">
               <Bot className="w-5 h-5 text-indigo-400" />
-              <h3 className="text-xs font-bold font-mono tracking-[0.15em] uppercase text-white">Secure Comms Interface</h3>
+              <h3 className="text-xs font-bold font-mono tracking-[0.15em] uppercase text-white">Dual Bot Comms Interface</h3>
             </div>
-            
-            {isDiscordConnected ? (
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 items-center bg-[#07090F]/70 border border-slate-800/40 p-4 rounded-2xl">
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+              {/* Primary Bot Section */}
+              <div className="bg-[#07090F]/50 border border-slate-800/40 p-4 rounded-2xl flex flex-col justify-between">
                 <div>
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono">
-                    <div className="flex items-center gap-2 text-emerald-400 font-semibold">
-                      <span className="relative flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                      </span>
-                      BOT ONLINE & BOUND TO VOICE
+                  <h4 className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-bold mb-3 flex items-center justify-between">
+                    <span>Bot 1 (Main Reminders)</span>
+                    <span className={`h-2 w-2 rounded-full ${isDiscordConnected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                  </h4>
+
+                  {isDiscordConnected ? (
+                    <div className="space-y-3">
+                      <div className="text-emerald-400 font-semibold text-xs flex items-center gap-1.5 font-mono">
+                        ONLINE & BOUND
+                      </div>
+                      <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
+                        Handles voice countdown warnings, TTS alerts, and custom sound milestones.
+                      </p>
                     </div>
-                    <button
-                      onClick={handleDiscordDisconnect}
-                      title="Disconnect the bot on this environment to avoid conflicts with your production bot deployments"
-                      className="text-[10px] text-rose-400/90 hover:text-rose-400 bg-rose-950/30 hover:bg-rose-950/50 border border-rose-900/45 px-2.5 py-1 rounded-md font-bold transition-all hover:scale-[1.02] active:scale-[0.98]"
-                    >
-                      Disconnect Bot
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-slate-500 mt-1.5 lines-relaxed">
-                    The Secretary is listening in real-time. Disconnect this local instance if it conflicts with your production bot at secretary.mafia.anvorte.com.
-                  </p>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                        Authorize Bot 1 with your Token to play countdowns and event reminders.
+                      </p>
+                      <form onSubmit={handleDiscordConnect} className="space-y-2">
+                        <input 
+                          type="password"
+                          placeholder="Bot 1 Token..."
+                          value={discordToken}
+                          onChange={e => setDiscordToken(e.target.value)}
+                          className="w-full bg-[#05060a] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-2.5 outline-none focus:border-indigo-500/50 transition-all font-mono placeholder:text-slate-600"
+                        />
+                        <button 
+                          type="submit"
+                          disabled={isDiscordConnecting || !discordToken}
+                          className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[10px] font-semibold py-2 rounded-xl transition-all font-mono uppercase tracking-wider"
+                        >
+                          {isDiscordConnecting ? 'Connecting...' : 'Connect Bot 1'}
+                        </button>
+                      </form>
+                    </div>
+                  )}
                 </div>
-                
-                {availableChannels.length > 0 && (
-                  <div className="flex flex-col gap-1.5 shrink-0">
-                    <span className="text-[9px] font-mono text-slate-500 uppercase">Test Link</span>
-                    <select 
-                      className="bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-2 outline-none cursor-pointer focus:border-indigo-500/50 transition-colors w-full md:w-52"
-                      onChange={e => {
-                        const val = e.target.value;
-                        if (val) {
-                          const lang = voices.find(v => v.uri === selectedVoice)?.lang || 'en';
-                          fetch('/api/discord/test', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ channelId: val, lang: lang })
-                          }).then(async res => {
-                            const data = await res.json();
-                            if (!res.ok) showToast("Failed: " + data.error, "error");
-                            else showToast(data.message, "success");
-                          }).catch(err => {
-                            console.error(err);
-                            showToast(String(err) || "Failed to fetch from test endpoint", "error");
-                          });
-                        }
-                      }}
+
+                {isDiscordConnected && (
+                  <div className="mt-4 pt-3 border-t border-slate-800/40 flex flex-col gap-2">
+                    {availableChannels.length > 0 && (
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[9px] font-mono text-slate-500 uppercase">Voice Test Trigger</span>
+                        <select 
+                          className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2 py-1.5 outline-none cursor-pointer focus:border-indigo-500/50 transition-colors w-full font-mono"
+                          onChange={e => {
+                            const val = e.target.value;
+                            if (val) {
+                              const lang = voices.find(v => v.uri === selectedVoice)?.lang || 'en';
+                              fetch('/api/discord/test', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ channelId: val, lang: lang })
+                              }).then(async res => {
+                                const data = await res.json();
+                                if (!res.ok) showToast("Failed: " + data.error, "error");
+                                else showToast(data.message, "success");
+                              }).catch(err => {
+                                console.error(err);
+                                showToast("Test voice failed", "error");
+                              });
+                            }
+                          }}
+                        >
+                          <option value="">-- Choose Channel to Test --</option>
+                          {availableChannels.map(c => (
+                            <option key={c.id} value={c.id}>{c.guildName} — {c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleDiscordDisconnect}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/30 py-1.5 rounded-xl transition-all font-bold font-mono"
                     >
-                      <option value="">-- Quick Voice Test --</option>
-                      {availableChannels.map(c => (
-                        <option key={c.id} value={c.id}>{c.guildName} — {c.name}</option>
-                      ))}
-                    </select>
+                      Disconnect Bot 1
+                    </button>
                   </div>
                 )}
               </div>
-            ) : (
-              <div className="flex flex-col gap-4 text-xs text-slate-400">
-                <div className="p-3 bg-rose-500/5 border border-rose-500/10 rounded-xl text-rose-300 flex gap-2.5 items-start">
-                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                  <p className="text-[11px] font-mono">
-                    Warning: Server bot is currently offline. Input your secret integration Token below to authorize secretary alerts.
-                  </p>
-                </div>
-                
-                <form onSubmit={handleDiscordConnect} className="flex flex-col md:flex-row gap-2 mt-1">
-                  <input 
-                    type="password"
-                    placeholder="Enter Discord Bot Token..."
-                    value={discordToken}
-                    onChange={e => setDiscordToken(e.target.value)}
-                    className="bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-4 py-3 flex-1 outline-none focus:border-indigo-500/50 transition-all font-mono placeholder:text-slate-600"
-                  />
-                  <button 
-                    type="submit"
-                    disabled={isDiscordConnecting || !discordToken}
-                    className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold py-3 px-5 rounded-xl transition-all flex items-center justify-center gap-1.5 font-mono shadow-md shadow-indigo-950/20 shrink-0"
-                  >
-                    {isDiscordConnecting ? 'Authenticating...' : 'Establish Connection'}
-                  </button>
-                </form>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 mt-2 pt-3 border-t border-slate-800/20 font-mono text-[11px] text-slate-500">
-                  <span>Need to avoid token conflicts with your production bot?</span>
-                  <button
-                    type="button"
-                    onClick={handleDiscordDisconnect}
-                    className="text-[10px] text-rose-400 hover:text-rose-300 bg-rose-950/25 hover:bg-rose-950/45 border border-rose-900/40 px-3 py-1.5 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98] font-bold"
-                  >
-                    Isolate & Disconnect Local Bot
-                  </button>
+              {/* Secondary Bot Section */}
+              <div className="bg-[#07090F]/50 border border-slate-800/40 p-4 rounded-2xl flex flex-col justify-between">
+                <div>
+                  <h4 className="text-[11px] font-mono uppercase tracking-wider text-slate-300 font-bold mb-3 flex items-center justify-between">
+                    <span>Bot 2 (Dedicated Target)</span>
+                    <span className={`h-2 w-2 rounded-full ${isDiscordConnected2 ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                  </h4>
+
+                  {isDiscordConnected2 ? (
+                    <div className="space-y-3">
+                      <div className="text-emerald-400 font-semibold text-xs flex items-center gap-1.5 font-mono">
+                        ONLINE & ACTIVE
+                      </div>
+                      <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
+                        Joins specific target channel only. Leaves automatically 5 minutes after event starts. TTS disabled to prevent overlap.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                        Connect Bot 2 to announce godfather audio and execute smart auto-transfers.
+                      </p>
+                      <form onSubmit={handleDiscordConnect2} className="space-y-2">
+                        <input 
+                          type="password"
+                          placeholder="Bot 2 Token..."
+                          value={discordToken2}
+                          onChange={e => setDiscordToken2(e.target.value)}
+                          className="w-full bg-[#05060a] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-2.5 outline-none focus:border-indigo-500/50 transition-all font-mono placeholder:text-slate-600"
+                        />
+                        <button 
+                          type="submit"
+                          disabled={isDiscordConnecting2 || !discordToken2}
+                          className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[10px] font-semibold py-2 rounded-xl transition-all font-mono uppercase tracking-wider"
+                        >
+                          {isDiscordConnecting2 ? 'Connecting...' : 'Connect Bot 2'}
+                        </button>
+                      </form>
+                    </div>
+                  )}
                 </div>
+
+                {isDiscordConnected2 && (
+                  <div className="mt-4 pt-3 border-t border-slate-800/40 flex flex-col gap-2.5">
+                    {/* Bot 2 Specific Settings */}
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-[9px] font-mono text-slate-500 uppercase">Target Voice Channel</span>
+                      <select 
+                        value={bot2ChannelId}
+                        onChange={e => {
+                          const val = e.target.value;
+                          syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, val, undefined);
+                          showToast("Secondary bot target channel updated.", "success");
+                        }}
+                        className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2 py-1.5 outline-none cursor-pointer focus:border-indigo-500/50 transition-colors w-full font-mono"
+                      >
+                        <option value="">-- Select Voice Channel --</option>
+                        {availableChannels.map(c => (
+                          <option key={c.id} value={c.id}>{c.guildName} — {c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 py-1">
+                      <div className="flex flex-col">
+                        <span className="text-[10px] font-bold text-slate-400">Auto Transfer at T-0</span>
+                        <span className="text-[8px] text-slate-500">Moves all users to target channel</span>
+                      </div>
+                      <input 
+                        type="checkbox"
+                        checked={autoTransferAtStart}
+                        onChange={e => {
+                          const val = e.target.checked;
+                          syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, val);
+                          showToast(val ? "Auto transfer engaged for T-0" : "Auto transfer disabled", "info");
+                        }}
+                        className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500/30 bg-[#05060a] border-slate-800 cursor-pointer"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={!bot2ChannelId}
+                      onClick={() => {
+                        fetch('/api/discord/transfer', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ channelId: bot2ChannelId })
+                        })
+                        .then(async res => {
+                          const data = await res.json();
+                          if (res.ok && data.success) {
+                            showToast(`Successfully transferred members! Moved: ${data.movedCount}`, "success");
+                          } else {
+                            showToast("Transfer failed: " + (data.error || "no users found in other voice channels"), "error");
+                          }
+                        })
+                        .catch(err => {
+                          console.error(err);
+                          showToast("Transfer transmission error", "error");
+                        });
+                      }}
+                      className="text-[10px] text-emerald-400 hover:text-emerald-300 bg-emerald-950/20 hover:bg-emerald-950/40 border border-emerald-900/30 py-1.5 rounded-xl transition-all font-bold font-mono uppercase tracking-wider disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      ⚡ Force Transfer All Here
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleDiscordDisconnect2}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 bg-rose-950/20 hover:bg-rose-950/40 border border-rose-900/30 py-1.5 rounded-xl transition-all font-bold font-mono"
+                    >
+                      Disconnect Bot 2
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
           </div>
 
           {/* Broadcast Briefing Settings Card */}
@@ -780,6 +989,55 @@ export default function App() {
                     />
                   </div>
 
+                  {/* Test Custom Warning Sound on Discord */}
+                  {isDiscordConnected && availableChannels.length > 0 && (
+                    <div className="mt-3 bg-[#07090F] p-3 rounded-2xl border border-rose-950/15 flex flex-col gap-2">
+                      <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider block">Test warning volume on Discord</span>
+                      <div className="flex gap-2">
+                        <select 
+                          id="test-warning-channel-select"
+                          className="bg-[#0c0f1a] border border-slate-800 text-slate-300 text-xs rounded-xl px-2.5 py-1.5 outline-none cursor-pointer focus:border-rose-500/40 transition-colors flex-1"
+                          defaultValue=""
+                        >
+                          <option value="">-- Select Discord Channel --</option>
+                          {availableChannels.map(c => (
+                            <option key={c.id} value={c.id}>{c.name} ({c.guildName})</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const selectEl = document.getElementById('test-warning-channel-select') as HTMLSelectElement;
+                            const channelId = selectEl?.value;
+                            if (!channelId) {
+                              showToast("Please select a Discord voice channel first.", "error");
+                              return;
+                            }
+                            fetch('/api/discord/test-warning-sound', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                channelId,
+                                fileName: warningAudioFileName,
+                                volume: warningAudioVolume
+                              })
+                            }).then(async res => {
+                              const data = await res.json();
+                              if (!res.ok) showToast("Test sound failed: " + data.error, "error");
+                              else showToast("Playing custom warning sound on Discord...", "success");
+                            }).catch(err => {
+                              console.error(err);
+                              showToast("Failed to run test warning sound.", "error");
+                            });
+                          }}
+                          className="bg-rose-950/45 hover:bg-rose-950/70 border border-rose-900/40 text-rose-300 font-mono text-xs px-3 py-1.5 rounded-xl transition-all font-semibold active:scale-[0.98]"
+                        >
+                          🔊 Test Sound
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Drag & Drop Area */}
                   <div 
                     onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-rose-500/5', 'border-rose-500/30'); }}
@@ -835,20 +1093,43 @@ export default function App() {
             </div>
 
             {/* Voice option selection */}
-            {voices.length > 0 && voiceCountdown && (
-              <div className="mb-5">
-                <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold font-mono block mb-1.5">Voice Synthesis Profile</label>
-                <select
-                  value={selectedVoice}
-                  onChange={handleVoiceChange}
-                  className="w-full bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-2.5 outline-none focus:border-rose-500/40 transition-colors cursor-pointer"
-                >
-                  {voices.map((v, i) => (
-                    <option key={i} value={v.uri}>
-                      {v.name} ({v.lang})
-                    </option>
-                  ))}
-                </select>
+            {voiceCountdown && (
+              <div className="mb-5 space-y-4">
+                <div>
+                  <label className="text-[10px] text-rose-500/80 uppercase tracking-widest font-bold font-mono block mb-1.5">Discord Voice Accent</label>
+                  <select
+                    value={voiceLang}
+                    onChange={e => {
+                      const val = e.target.value;
+                      syncSettings(warnings, voiceCountdown, val);
+                      showToast(`Discord accent updated to: ${val}`, "success");
+                    }}
+                    className="w-full bg-[#07090F] border border-slate-800 text-slate-300 text-xs rounded-xl px-3 py-2.5 outline-none focus:border-rose-500/40 transition-colors cursor-pointer font-sans"
+                  >
+                    {DISCORD_VOICE_ACCENTS.map((acc) => (
+                      <option key={acc.value} value={acc.value}>
+                        {acc.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {voices.length > 0 && (
+                  <div>
+                    <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold font-mono block mb-1.5">Local Browser Voice Override</label>
+                    <select
+                      value={selectedVoice}
+                      onChange={handleVoiceChange}
+                      className="w-full bg-[#07090F] border border-slate-800 text-slate-400 text-xs rounded-xl px-3 py-2 outline-none focus:border-rose-500/40 transition-colors cursor-pointer"
+                    >
+                      {voices.map((v, i) => (
+                        <option key={i} value={v.uri}>
+                          {v.name} ({v.lang})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
             )}
 

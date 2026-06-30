@@ -4,7 +4,7 @@ import fs from "fs";
 import dotenv from "dotenv";
 
 import { createServer as createViteServer } from "vite";
-import { initDiscordBot, getAvailableVoiceChannels, isDiscordConnected } from "./discordBot.js";
+import { initDiscordBot, initDiscordBot2, getAvailableVoiceChannels, isDiscordConnected, isDiscordConnected2, stopDiscordBot, stopDiscordBot2, transferVoiceMembers, client, client2 } from "./discordBot.js";
 import { ScheduledEvent } from "./src/hooks/useSchedule.js";
 
 dotenv.config();
@@ -43,7 +43,9 @@ export const globalSettings: any = {
   voiceStartText: "Clear comms and chat and get that win.",
   warningAudioOffsetSec: 30,
   warningAudioFileName: "godfather-theme-15s.mp3",
-  warningAudioVolume: 100
+  warningAudioVolume: 100,
+  bot2ChannelId: "",
+  autoTransferAtStart: false
 };
 
 const PREFS_FILE = path.join(process.cwd(), '.discord-prefs.json');
@@ -52,6 +54,9 @@ try {
     const prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf-8'));
     if (prefs.token) {
       process.env.DISCORD_TOKEN = prefs.token;
+    }
+    if (prefs.token2) {
+      process.env.DISCORD_TOKEN_2 = prefs.token2;
     }
     if (prefs.schedule) {
       globalSchedule.events = prefs.schedule;
@@ -68,6 +73,7 @@ function savePrefs() {
   try {
     const data = {
       token: process.env.DISCORD_TOKEN,
+      token2: process.env.DISCORD_TOKEN_2,
       schedule: globalSchedule.events,
       settings: globalSettings
     };
@@ -128,6 +134,12 @@ async function startServer() {
     if (typeof req.body.warningAudioVolume === 'number') {
       globalSettings.warningAudioVolume = req.body.warningAudioVolume;
     }
+    if (typeof req.body.bot2ChannelId === 'string') {
+      globalSettings.bot2ChannelId = req.body.bot2ChannelId;
+    }
+    if (typeof req.body.autoTransferAtStart === 'boolean') {
+      globalSettings.autoTransferAtStart = req.body.autoTransferAtStart;
+    }
     globalSettings.timezone = "Asia/Manila";
     savePrefs();
     res.json({ success: true, settings: globalSettings });
@@ -183,10 +195,13 @@ async function startServer() {
 
   // API to query connection status
   app.get("/api/discord/status", (req, res) => {
-    res.json({ connected: isDiscordConnected() });
+    res.json({
+      connected: isDiscordConnected(),
+      connected2: isDiscordConnected2()
+    });
   });
 
-  // API to connect externally
+  // API to connect Bot 1
   app.post("/api/discord/connect", async (req, res) => {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: "Token is required" });
@@ -197,22 +212,76 @@ async function startServer() {
       process.env.DISCORD_TOKEN = token;
       savePrefs();
 
-      res.json({ success: true, message: "Connected to Discord successfully!" });
+      res.json({ success: true, message: "Connected Bot 1 to Discord successfully!" });
     } catch (err: any) {
-      res.status(400).json({ error: "Failed to connect: " + err.message });
+      res.status(400).json({ error: "Failed to connect Bot 1: " + err.message });
     }
   });
 
-  // API to disconnect and disengage of token conflict
+  // API to connect Bot 2
+  app.post("/api/discord/connect2", async (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: "Secondary token is required" });
+    
+    try {
+      await initDiscordBot2(globalSchedule, globalSettings, token);
+      
+      process.env.DISCORD_TOKEN_2 = token;
+      savePrefs();
+
+      res.json({ success: true, message: "Connected Bot 2 to Discord successfully!" });
+    } catch (err: any) {
+      res.status(400).json({ error: "Failed to connect Bot 2: " + err.message });
+    }
+  });
+
+  // API to disconnect Bot 1
   app.post("/api/discord/disconnect", async (req, res) => {
     try {
-      const { stopDiscordBot } = await import("./discordBot.js");
       stopDiscordBot();
       process.env.DISCORD_TOKEN = "";
       savePrefs();
-      res.json({ success: true, message: "Discord bot stopped successfully and session disengaged." });
+      res.json({ success: true, message: "Discord Bot 1 stopped successfully and session disengaged." });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to disengage bot: " + err.message });
+      res.status(500).json({ error: "Failed to disengage Bot 1: " + err.message });
+    }
+  });
+
+  // API to disconnect Bot 2
+  app.post("/api/discord/disconnect2", async (req, res) => {
+    try {
+      stopDiscordBot2();
+      process.env.DISCORD_TOKEN_2 = "";
+      savePrefs();
+      res.json({ success: true, message: "Discord Bot 2 stopped successfully and session disengaged." });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to disengage Bot 2: " + err.message });
+    }
+  });
+
+  // API to execute member transfer manually
+  app.post("/api/discord/transfer", async (req, res) => {
+    const { channelId } = req.body;
+    if (!channelId) return res.status(400).json({ error: "Target voice channel ID is required" });
+
+    try {
+      const activeClient = (isDiscordConnected() ? client : null) || (isDiscordConnected2() ? client2 : null);
+      if (!activeClient || !activeClient.isReady()) {
+        return res.status(400).json({ error: "No active bot client is currently connected and online." });
+      }
+
+      let totalMoved = 0;
+      let totalFailed = 0;
+
+      for (const guild of activeClient.guilds.cache.values()) {
+        const { movedCount, failedCount } = await transferVoiceMembers(guild, channelId);
+        totalMoved += movedCount;
+        totalFailed += failedCount;
+      }
+
+      res.json({ success: true, movedCount: totalMoved, failedCount: totalFailed });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to execute transfer: " + err.message });
     }
   });
 
@@ -224,6 +293,22 @@ async function startServer() {
       
       await testVoice(channelId, lang || 'en');
       res.json({ success: true, message: "Test voice requested." });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: err.message, stack: err.stack });
+    }
+  });
+
+  app.post("/api/discord/test-warning-sound", async (req, res) => {
+    try {
+      const { testWarningSound } = await import("./discordBot.js");
+      const { channelId, fileName, volume } = req.body;
+      if (!channelId) return res.status(400).json({ error: "Missing channelId" });
+      if (!fileName) return res.status(400).json({ error: "Missing fileName" });
+      
+      const volNum = typeof volume === 'number' ? volume : 100;
+      await testWarningSound(channelId, fileName, volNum);
+      res.json({ success: true, message: `Test warning sound playing on Discord channel.` });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: err.message, stack: err.stack });
@@ -254,16 +339,28 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
-  // Initialize Discord Bot
+  // Initialize Discord Bot 1
   if (process.env.DISCORD_TOKEN) {
     try {
       initDiscordBot(globalSchedule, globalSettings);
-      console.log("Discord bot initialized.");
+      console.log("Discord Bot 1 initialized.");
     } catch (e) {
-      console.error("Failed to initialize discord bot:", e);
+      console.error("Failed to initialize discord bot 1:", e);
     }
   } else {
-    console.log("DISCORD_TOKEN environment variable is not set. Discord features are disabled.");
+    console.log("DISCORD_TOKEN environment variable is not set. Discord Bot 1 is disabled.");
+  }
+
+  // Initialize Discord Bot 2
+  if (process.env.DISCORD_TOKEN_2) {
+    try {
+      initDiscordBot2(globalSchedule, globalSettings);
+      console.log("Discord Bot 2 initialized.");
+    } catch (e) {
+      console.error("Failed to initialize discord bot 2:", e);
+    }
+  } else {
+    console.log("DISCORD_TOKEN_2 environment variable is not set. Discord Bot 2 is disabled.");
   }
 }
 
