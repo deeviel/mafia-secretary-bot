@@ -90,6 +90,7 @@ export default function App() {
   const [newEventName, setNewEventName] = useState('');
   const [newEventTime, setNewEventTime] = useState('09:00');
   const [newEventChannelIds, setNewEventChannelIds] = useState<string[]>([]);
+  const [newEventBot2ChannelIds, setNewEventBot2ChannelIds] = useState<string[]>([]);
   const [newEventDays, setNewEventDays] = useState<number[]>([]);
   const [newEventAutoTransfer, setNewEventAutoTransfer] = useState(false);
   const [newEventAutoTransferDelayMins, setNewEventAutoTransferDelayMins] = useState(0);
@@ -494,6 +495,7 @@ export default function App() {
               name: newEventName, 
               time: newEventTime, 
               channelIds: newEventChannelIds, 
+              bot2ChannelIds: newEventBot2ChannelIds,
               days: newEventDays,
               autoTransferEnabled: newEventAutoTransfer,
               autoTransferDelayMins: newEventAutoTransferDelayMins
@@ -508,6 +510,7 @@ export default function App() {
             time: newEventTime,
             enabled: true,
             channelIds: newEventChannelIds,
+            bot2ChannelIds: newEventBot2ChannelIds,
             days: newEventDays,
             autoTransferEnabled: newEventAutoTransfer,
             autoTransferDelayMins: newEventAutoTransferDelayMins
@@ -516,6 +519,7 @@ export default function App() {
     }
     setNewEventName('');
     setNewEventChannelIds([]);
+    setNewEventBot2ChannelIds([]);
     setNewEventDays([]);
     setNewEventAutoTransfer(false);
     setNewEventAutoTransferDelayMins(0);
@@ -526,6 +530,7 @@ export default function App() {
     setNewEventName(ev.name);
     setNewEventTime(ev.time);
     setNewEventChannelIds(ev.channelIds || []);
+    setNewEventBot2ChannelIds(ev.bot2ChannelIds || []);
     setNewEventDays(ev.days || []);
     setNewEventAutoTransfer(ev.autoTransferEnabled || false);
     setNewEventAutoTransferDelayMins(ev.autoTransferDelayMins || 0);
@@ -535,6 +540,7 @@ export default function App() {
     setEditingId(null);
     setNewEventName('');
     setNewEventChannelIds([]);
+    setNewEventBot2ChannelIds([]);
     setNewEventDays([]);
     setNewEventAutoTransfer(false);
     setNewEventAutoTransferDelayMins(0);
@@ -1236,6 +1242,28 @@ export default function App() {
                             <span className="text-slate-400 font-mono">{ev.days.map(d => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d]).join(", ")}</span>
                           </>
                         )}
+                        {ev.channelIds && ev.channelIds.length > 0 && (
+                          <>
+                            <span>•</span>
+                            <span className="text-slate-400 font-mono">
+                              Bot 1: {ev.channelIds.map(id => {
+                                const ch = availableChannels.find(c => c.id === id);
+                                return ch ? ch.name : id;
+                              }).join(", ")}
+                            </span>
+                          </>
+                        )}
+                        {ev.bot2ChannelIds && ev.bot2ChannelIds.length > 0 && (
+                          <>
+                            <span>•</span>
+                            <span className="text-slate-400 font-mono">
+                              Bot 2: {ev.bot2ChannelIds.map(id => {
+                                const ch = availableChannels.find(c => c.id === id);
+                                return ch ? ch.name : id;
+                              }).join(", ")}
+                            </span>
+                          </>
+                        )}
                         {ev.autoTransferEnabled && (
                           <>
                             <span>•</span>
@@ -1360,31 +1388,59 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Channel list multiselect */}
+              {/* Bot 1 and Bot 2 Voice Channel settings */}
               {availableChannels.length > 0 && (
-                <div className="flex flex-col gap-1.5 mt-2 border-t border-rose-950/10 pt-3">
-                  <span className="text-[10px] font-mono uppercase text-slate-500 font-semibold">Restrict to Channels:</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {availableChannels.map(ch => {
-                      const isSelected = newEventChannelIds.includes(ch.id);
-                      return (
-                        <button
-                          key={ch.id}
-                          type="button"
-                          onClick={() => {
-                            if (isSelected) setNewEventChannelIds(prev => prev.filter(id => id !== ch.id));
-                            else setNewEventChannelIds(prev => [...prev, ch.id]);
-                          }}
-                          className={`px-2.5 py-1 rounded-lg border transition-all duration-200 font-mono text-[9px] ${
-                            isSelected 
-                              ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 font-semibold' 
-                              : 'bg-transparent border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
-                          }`}
-                        >
-                          {ch.guildName} — {ch.name}
-                        </button>
-                      );
-                    })}
+                <div className="flex flex-col gap-3 mt-2 border-t border-rose-950/10 pt-3">
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-mono uppercase text-slate-500 font-semibold">Bot 1 Voice Channels:</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableChannels.map(ch => {
+                        const isSelected = newEventChannelIds.includes(ch.id);
+                        return (
+                          <button
+                            key={ch.id}
+                            type="button"
+                            onClick={() => {
+                              if (isSelected) setNewEventChannelIds(prev => prev.filter(id => id !== ch.id));
+                              else setNewEventChannelIds(prev => [...prev, ch.id]);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg border transition-all duration-200 font-mono text-[9px] ${
+                              isSelected 
+                                ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 font-semibold' 
+                                : 'bg-transparent border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
+                            }`}
+                          >
+                            {ch.guildName} — {ch.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5 border-t border-slate-800/20 pt-2">
+                    <span className="text-[10px] font-mono uppercase text-slate-500 font-semibold">Bot 2 Voice Channels:</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableChannels.map(ch => {
+                        const isSelected = newEventBot2ChannelIds.includes(ch.id);
+                        return (
+                          <button
+                            key={ch.id}
+                            type="button"
+                            onClick={() => {
+                              if (isSelected) setNewEventBot2ChannelIds(prev => prev.filter(id => id !== ch.id));
+                              else setNewEventBot2ChannelIds(prev => [...prev, ch.id]);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg border transition-all duration-200 font-mono text-[9px] ${
+                              isSelected 
+                                ? 'bg-cyan-500/15 text-cyan-400 border-cyan-500/40 font-semibold' 
+                                : 'bg-transparent border-slate-800 text-slate-400 hover:text-slate-300 hover:border-slate-700'
+                            }`}
+                          >
+                            {ch.guildName} — {ch.name}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}

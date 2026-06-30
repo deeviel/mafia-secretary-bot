@@ -493,18 +493,27 @@ async function playLocalFileInChannelForClient(
   }
 }
 
-export async function playLocalFileInChannels(filePath: string, channelIds: string[], options?: { volume?: number, maxDurationSec?: number }) {
+export async function playLocalFileInChannels(
+  filePath: string, 
+  channelIds: string[], 
+  options?: { volume?: number, maxDurationSec?: number },
+  allowedClient?: 'bot1' | 'bot2'
+) {
   if (channelIds.length === 0) {
-    const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
-    if (fallbackId) channelIds = [fallbackId];
-    else return;
+    if (!allowedClient || allowedClient === 'bot1') {
+      const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
+      if (fallbackId) channelIds = [fallbackId];
+      else return;
+    } else {
+      return;
+    }
   }
 
-  debugLog(`Requested local file playback: "${filePath}" into channels: ${channelIds.join(', ')}`);
+  debugLog(`Requested local file playback: "${filePath}" into channels: ${channelIds.join(', ')} (allowedClient: ${allowedClient || 'both'})`);
 
   for (const channelId of channelIds) {
     // Try to play on bot 1
-    if (client && client.isReady()) {
+    if ((!allowedClient || allowedClient === 'bot1') && client && client.isReady()) {
       try {
         const channel = await client.channels.fetch(channelId).catch(() => null);
         if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
@@ -516,7 +525,7 @@ export async function playLocalFileInChannels(filePath: string, channelIds: stri
     }
 
     // Try to play on bot 2
-    if (client2 && client2.isReady()) {
+    if ((!allowedClient || allowedClient === 'bot2') && client2 && client2.isReady()) {
       try {
         const channel = await client2.channels.fetch(channelId).catch(() => null);
         if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
@@ -1129,20 +1138,13 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
   for (const channelId of channelIds) {
     try {
       // Determine which client and group key to use
+      // Text-to-speech (ss function) is restricted to ONLY use the first/main bot (client)
       let selectedClient: Client | null = null;
       let group: string | undefined = undefined;
 
-      const bot2ChId = activeSettings?.bot2ChannelId;
-
-      if (client2 && client2.isReady() && channelId === bot2ChId) {
-        selectedClient = client2;
-        group = "bot2";
-      } else if (client && client.isReady()) {
+      if (client && client.isReady()) {
         selectedClient = client;
         group = undefined;
-      } else if (client2 && client2.isReady()) {
-        selectedClient = client2;
-        group = "bot2";
       }
 
       if (!selectedClient) {
@@ -1383,14 +1385,17 @@ function startScheduleLoop(
       let shouldBeConnected2 = false;
       let targetConnectionChannels2: string[] = [];
 
-      if (nextEvent && globalSettings.bot2ChannelId) {
+      if (nextEvent) {
           const warnMins = globalSettings.warnings || [];
           const maxWarn = warnMins.length > 0 ? Math.max(...warnMins) : 30;
           
           // Connect starting from max warning plus 2 mins, up until exactly 5 mins after starting
           if (minsLeft <= maxWarn + 2 && minsLeft > -5) {
              shouldBeConnected2 = true;
-             targetConnectionChannels2 = [globalSettings.bot2ChannelId];
+          }
+
+          if (shouldBeConnected2) {
+             targetConnectionChannels2 = nextEvent.bot2ChannelIds || [];
           }
       }
 
@@ -1435,8 +1440,7 @@ function startScheduleLoop(
     const eventId = nextEvent.id;
     const occurrenceId = `${eventId}_${nextTime}`;
     const targetChannels = nextEvent.channelIds || [];
-    const bot2Chs = globalSettings.bot2ChannelId ? [globalSettings.bot2ChannelId] : [];
-    const mergedChs = Array.from(new Set([...targetChannels, ...bot2Chs]));
+    const bot2TargetChannels = nextEvent.bot2ChannelIds || [];
 
     const triggerAutoTransfer = () => {
       const isEnabled = nextEvent.autoTransferEnabled !== undefined
@@ -1448,7 +1452,7 @@ function startScheduleLoop(
           ? nextEvent.autoTransferDelayMins
           : (typeof globalSettings.autoTransferDelayMins === 'number' ? globalSettings.autoTransferDelayMins : 0);
 
-        const targetChId = targetChannels[0] || globalSettings.bot2ChannelId;
+        const targetChId = globalSettings.bot2ChannelId;
         if (targetChId) {
           if (delayMins <= 0) {
             debugLog(`Executing immediate automatic member transfer at T-0s to channel: ${targetChId}`);
@@ -1504,13 +1508,20 @@ function startScheduleLoop(
           const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
           const customAudioPath = path.join(process.cwd(), customFileName);
           if (fs.existsSync(customAudioPath)) {
-            // Play custom warning audio on BOTH bots (using mergedChs)
-            playLocalFileInChannels(customAudioPath, mergedChs, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 });
+            // Play custom warning audio on Bot 1 channels
+            playLocalFileInChannels(customAudioPath, targetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot1');
+            // Play custom warning audio on Bot 2 channels
+            if (bot2TargetChannels.length > 0) {
+              playLocalFileInChannels(customAudioPath, bot2TargetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot2');
+            }
             debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name} with volume ${globalSettings.warningAudioVolume || 100}% playing for max 10s`);
           } else {
             const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
             if (fs.existsSync(fallbackPath)) {
-              playLocalFileInChannels(fallbackPath, mergedChs, { volume: 100, maxDurationSec: 10 });
+              playLocalFileInChannels(fallbackPath, targetChannels, { volume: 100, maxDurationSec: 10 }, 'bot1');
+              if (bot2TargetChannels.length > 0) {
+                playLocalFileInChannels(fallbackPath, bot2TargetChannels, { volume: 100, maxDurationSec: 10 }, 'bot2');
+              }
               debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name}`);
             } else {
               debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);
@@ -1523,8 +1534,12 @@ function startScheduleLoop(
           milestones.add(milestoneKey);
           const cachedFile = cachedSpeechPaths.get(secsLeft.toString());
           if (cachedFile && fs.existsSync(cachedFile)) {
-            // Play cached countdown MP3 on BOTH bots
-            playLocalFileInChannels(cachedFile, mergedChs);
+            // Play cached countdown MP3 on Bot 1
+            playLocalFileInChannels(cachedFile, targetChannels, undefined, 'bot1');
+            // Play cached countdown MP3 on Bot 2
+            if (bot2TargetChannels.length > 0) {
+              playLocalFileInChannels(cachedFile, bot2TargetChannels, undefined, 'bot2');
+            }
           } else {
             // Fallback: TTS only on Bot 1
             playAudioInVoiceChannels(secsLeft.toString(), targetChannels, globalSettings.voiceLang, true);
@@ -1541,8 +1556,12 @@ function startScheduleLoop(
           const clearCommsFile = cachedSpeechPaths.get('clear-comms');
           
           if (isDefaultText && clearCommsFile && fs.existsSync(clearCommsFile)) {
-            // Play clear comms on BOTH bots
-            playLocalFileInChannels(clearCommsFile, mergedChs);
+            // Play clear comms on Bot 1
+            playLocalFileInChannels(clearCommsFile, targetChannels, undefined, 'bot1');
+            // Play clear comms on Bot 2
+            if (bot2TargetChannels.length > 0) {
+              playLocalFileInChannels(clearCommsFile, bot2TargetChannels, undefined, 'bot2');
+            }
             setTimeout(() => {
               // TTS on Bot 1 only
               playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);

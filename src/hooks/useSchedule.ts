@@ -7,6 +7,7 @@ export interface ScheduledEvent {
   time: string; // "HH:mm" in 24h format
   enabled: boolean;
   channelIds?: string[];
+  bot2ChannelIds?: string[];
   days?: number[];
   autoTransferEnabled?: boolean;
   autoTransferDelayMins?: number;
