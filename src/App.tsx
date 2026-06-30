@@ -116,8 +116,6 @@ export default function App() {
   const [bot2ChannelId, setBot2ChannelId] = useState('');
   const [autoTransferAtStart, setAutoTransferAtStart] = useState(false);
   const [autoTransferDelayMins, setAutoTransferDelayMins] = useState(0);
-  const [autoTransferType, setAutoTransferType] = useState<'delay' | 'absolute'>('delay');
-  const [autoTransferTime, setAutoTransferTime] = useState('09:20');
   
   // Discord channels
   const [availableChannels, setAvailableChannels] = useState<{id:string, name:string, guildName:string}[]>([]);
@@ -211,8 +209,6 @@ export default function App() {
         if (typeof data.bot2ChannelId === 'string') setBot2ChannelId(data.bot2ChannelId);
         if (typeof data.autoTransferAtStart === 'boolean') setAutoTransferAtStart(data.autoTransferAtStart);
         if (typeof data.autoTransferDelayMins === 'number') setAutoTransferDelayMins(data.autoTransferDelayMins);
-        if (typeof data.autoTransferType === 'string') setAutoTransferType(data.autoTransferType);
-        if (typeof data.autoTransferTime === 'string') setAutoTransferTime(data.autoTransferTime);
         setTimezone("Asia/Manila");
         // Ensure backend setting is set to Asia/Manila too
         fetch('/api/settings', {
@@ -290,9 +286,7 @@ export default function App() {
     newBot2ChannelId?: string,
     newAutoTransferAtStart?: boolean,
     newAutoTransferDelayMins?: number,
-    newWarningAudioEnabled?: boolean,
-    newAutoTransferType?: 'delay' | 'absolute',
-    newAutoTransferTime?: string
+    newWarningAudioEnabled?: boolean
   ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
@@ -305,15 +299,11 @@ export default function App() {
     if (newBot2ChannelId !== undefined) setBot2ChannelId(newBot2ChannelId);
     if (newAutoTransferAtStart !== undefined) setAutoTransferAtStart(newAutoTransferAtStart);
     if (newAutoTransferDelayMins !== undefined) setAutoTransferDelayMins(newAutoTransferDelayMins);
-    if (newAutoTransferType !== undefined) setAutoTransferType(newAutoTransferType);
-    if (newAutoTransferTime !== undefined) setAutoTransferTime(newAutoTransferTime);
 
     const lang = newVoiceLang !== undefined ? newVoiceLang : voiceLang;
     const bot2Ch = newBot2ChannelId !== undefined ? newBot2ChannelId : bot2ChannelId;
     const autoTrans = newAutoTransferAtStart !== undefined ? newAutoTransferAtStart : autoTransferAtStart;
     const autoTransDelay = newAutoTransferDelayMins !== undefined ? newAutoTransferDelayMins : autoTransferDelayMins;
-    const autoTransType = newAutoTransferType !== undefined ? newAutoTransferType : autoTransferType;
-    const autoTransTime = newAutoTransferTime !== undefined ? newAutoTransferTime : autoTransferTime;
     
     const postBody = {
       warnings: updatedWarnings,
@@ -327,9 +317,7 @@ export default function App() {
       warningAudioEnabled: newWarningAudioEnabled !== undefined ? newWarningAudioEnabled : warningAudioEnabled,
       bot2ChannelId: bot2Ch,
       autoTransferAtStart: autoTrans,
-      autoTransferDelayMins: autoTransDelay,
-      autoTransferType: autoTransType,
-      autoTransferTime: autoTransTime
+      autoTransferDelayMins: autoTransDelay
     };
 
     fetch('/api/settings', {
@@ -872,66 +860,22 @@ export default function App() {
                     </div>
 
                     {autoTransferAtStart && (
-                      <div className="flex flex-col gap-2.5 bg-[#05060a]/40 p-3 rounded-xl border border-slate-800/40">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[9px] font-mono text-slate-400">Trigger Mode:</span>
-                          <div className="flex gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'delay')}
-                              className={`text-[8px] font-mono px-2 py-0.5 rounded border transition-all ${
-                                autoTransferType === 'delay'
-                                  ? 'bg-rose-950/40 text-rose-400 border-rose-900/40'
-                                  : 'bg-transparent text-slate-500 border-slate-800/40 hover:text-slate-400'
-                              }`}
-                            >
-                              Relative Delay
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'absolute')}
-                              className={`text-[8px] font-mono px-2 py-0.5 rounded border transition-all ${
-                                autoTransferType === 'absolute'
-                                  ? 'bg-rose-950/40 text-rose-400 border-rose-900/40'
-                                  : 'bg-transparent text-slate-500 border-slate-800/40 hover:text-slate-400'
-                              }`}
-                            >
-                              Specific Time
-                            </button>
-                          </div>
+                      <div className="flex flex-col gap-1 py-1">
+                        <div className="flex justify-between items-center text-[10px] font-bold text-slate-400">
+                          <span>Transfer Delay (Minutes)</span>
+                          <span className="text-[9px] font-mono text-indigo-400">{autoTransferDelayMins === 0 ? "Immediate (T-0)" : `T + ${autoTransferDelayMins} mins`}</span>
                         </div>
-
-                        {autoTransferType === 'delay' ? (
-                          <div className="flex flex-col gap-1">
-                            <div className="flex justify-between items-center text-[10px] font-bold text-slate-400">
-                              <span>Transfer Delay (Minutes)</span>
-                              <span className="text-[9px] font-mono text-indigo-400">{autoTransferDelayMins === 0 ? "Immediate (T-0)" : `T + ${autoTransferDelayMins} mins`}</span>
-                            </div>
-                            <input 
-                              type="number"
-                              min="0"
-                              max="60"
-                              value={autoTransferDelayMins}
-                              onChange={e => {
-                                const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, val);
-                              }}
-                              className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2.5 py-1.5 outline-none focus:border-indigo-500/50 transition-colors w-full font-mono text-center"
-                            />
-                          </div>
-                        ) : (
-                          <div className="flex flex-col gap-1">
-                            <span className="text-[10px] font-bold text-slate-400">Transfer Time (24h format):</span>
-                            <input 
-                              type="time"
-                              value={autoTransferTime}
-                              onChange={e => {
-                                syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, e.target.value);
-                              }}
-                              className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2.5 py-1.5 outline-none focus:border-indigo-500/50 transition-colors w-full font-mono text-center"
-                            />
-                          </div>
-                        )}
+                        <input 
+                          type="number"
+                          min="0"
+                          max="60"
+                          value={autoTransferDelayMins}
+                          onChange={e => {
+                            const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                            syncSettings(warnings, voiceCountdown, undefined, undefined, undefined, undefined, undefined, undefined, undefined, val);
+                          }}
+                          className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2.5 py-1.5 outline-none focus:border-indigo-500/50 transition-colors w-full font-mono"
+                        />
                       </div>
                     )}
 
