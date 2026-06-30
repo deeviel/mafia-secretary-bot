@@ -216,10 +216,9 @@ export async function ensureVoiceConnectionReady(channel: any, group?: string): 
 
     // If already ready, return instantly (with idle check to bypass UDP drops)
     if (connection.state.status === VoiceConnectionStatus.Ready) {
-      const idleTime = Date.now() - (lastAudioPlayTime.get(connectionKey) || 0);
       const queue = guildAudioQueues.get(connectionKey) || [];
-      if (idleTime > 15000 && !guildIsPlaying.get(connectionKey) && queue.length === 0) {
-        debugLog(`[Voice Connection] Connection idle for ${idleTime}ms. Forcing reconnect to bypass UDP NAT drops...`);
+      if (!guildIsPlaying.get(connectionKey) && queue.length === 0) {
+        debugLog(`[Voice Connection] Connection currently idle. Forcing reconnect to guarantee UDP path...`);
         try { connection.destroy(); } catch (e) {}
         connection = getOrCreateVoiceConnection(channel, group);
       } else {
@@ -275,15 +274,7 @@ export async function ensureVoiceConnectionReady(channel: any, group?: string): 
       return true;
     } catch (err: any) {
       const errStr = String(err.message || err);
-      if (!errStr.includes("The operation was aborted") && !errStr.includes("destroyed")) {
-        debugLog(`[Voice Connection Stalled] Connection failed to reach READY status. Current state: "${connection.state.status}". Error: ${err.message}`);
-        debugLog(`[Diagnosis] A voice connection stuck in "signalling" state typically indicates:`);
-        debugLog(`  * Option A: Dynamic outward UDP egress/sockets are sandboxed or restricted in this container. This is expected in the Google AI Studio Sandbox/Cloud Run environment, but will work seamlessly on your dedicated CloudPanel VPS deployment where dynamic UDP routing is fully enabled.`);
-        debugLog(`  * Option B: Bot Token conflict. If your production bot at https://secretary.mafia.anvorte.com/ is simultaneously running with this exact token, Discord kills the voice session state for one client. You can use the "Disconnect Bot" button on the UI dashboard to turn off the bot here!`);
-      } else {
-        debugLog(`[Voice Connection State] Connection to channel "${channel.name}" cleanly terminated before reaching READY (likely clean disconnect or timeout jump).`);
-        return false;
-      }
+      debugLog(`[Voice Connection Stalled/Timeout] Connection failed to reach READY status within 10s. Current state: "${connection.state.status}". Error: ${errStr}`);
       
       // --- Self-Healing Retry ---
       // Re-creating the connection forces a brand-new UDP socket binding which handles strict NATs / frozen routes
