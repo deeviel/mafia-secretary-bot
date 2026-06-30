@@ -1016,16 +1016,18 @@ function startScheduleLoop(
 
       if (nextEvent) {
           const warnMins = globalSettings.warnings || [];
-          if (minsLeft <= 5 && minsLeft >= -5) {
+          const maxWarn = warnMins.length > 0 ? Math.max(...warnMins) : 30;
+          
+          if (minsLeft <= maxWarn + 2 && minsLeft >= -5) {
              shouldBeConnected = true;
-          } else {
-             for (const w of warnMins) {
-                 if (minsLeft <= w + 2 && minsLeft >= w - 1) {
-                    shouldBeConnected = true;
-                 }
+          }
+
+          if (shouldBeConnected) {
+             targetConnectionChannels = nextEvent.channelIds || [];
+             if (targetConnectionChannels.length === 0 && process.env.DISCORD_VOICE_CHANNEL_ID) {
+                targetConnectionChannels = [process.env.DISCORD_VOICE_CHANNEL_ID];
              }
           }
-          if (shouldBeConnected) targetConnectionChannels = nextEvent.channelIds || [];
       }
 
       // Check active voice queues
@@ -1042,8 +1044,11 @@ function startScheduleLoop(
 
       if (shouldBeConnected && targetConnectionChannels.length > 0) {
           targetConnectionChannels.forEach(channelId => {
-             client?.channels.fetch(channelId).then(channel => {
-                 if (channel?.type === ChannelType.GuildVoice) getOrCreateVoiceConnection(channel);
+             client?.channels.fetch(channelId).then(async channel => {
+                 if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
+                     const connection = getOrCreateVoiceConnection(channel);
+                     await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
+                 }
              }).catch(()=>{});
           });
       } else if (!shouldBeConnected && activeGuildIds.size > 0) {
