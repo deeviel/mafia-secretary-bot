@@ -63,7 +63,7 @@ export let client: Client | null = null;
 export let client2: Client | null = null;
 export let activeSettings: DiscordBotSettings | null = null;
 const activeGuildIds = new Set<string>();
-let lastAudioPlayTime = 0;
+const lastAudioPlayTime = new Map<string, number>();
 
 async function resolveMentions(text: string, guild: any): Promise<string> {
   if (!text) return text;
@@ -197,22 +197,36 @@ export function getOrCreateVoiceConnection(channel: any, group?: string): any {
 
 const voiceReadyPromises = new Map<string, Promise<boolean>>();
 
-export async function ensureVoiceConnectionReady(connection: any, channel: any, group?: string): Promise<boolean> {
+export async function ensureVoiceConnectionReady(channel: any, group?: string): Promise<any> {
   const guildId = channel.guild.id;
   const connectionKey = group ? `${guildId}_${group}` : guildId;
-
-  // If already ready, return instantly
-  if (connection.state.status === VoiceConnectionStatus.Ready) {
-    return true;
-  }
 
   // If there's an active ready-check promise, await it
   if (voiceReadyPromises.has(connectionKey)) {
     debugLog(`[Voice Connection] Awaiting existing ready check for key: ${connectionKey}...`);
-    return await voiceReadyPromises.get(connectionKey)!;
+    const isReady = await voiceReadyPromises.get(connectionKey)!;
+    if (isReady) {
+      return getOrCreateVoiceConnection(channel, group);
+    }
+    return null;
   }
 
   const checkPromise = (async () => {
+    let connection = getOrCreateVoiceConnection(channel, group);
+
+    // If already ready, return instantly (with idle check to bypass UDP drops)
+    if (connection.state.status === VoiceConnectionStatus.Ready) {
+      const idleTime = Date.now() - (lastAudioPlayTime.get(connectionKey) || 0);
+      const queue = guildAudioQueues.get(connectionKey) || [];
+      if (idleTime > 15000 && !guildIsPlaying.get(connectionKey) && queue.length === 0) {
+        debugLog(`[Voice Connection] Connection idle for ${idleTime}ms. Forcing reconnect to bypass UDP NAT drops...`);
+        try { connection.destroy(); } catch (e) {}
+        connection = getOrCreateVoiceConnection(channel, group);
+      } else {
+        return true;
+      }
+    }
+
     // Hook listeners for robust reconnection state changes
     if (!connection._hasListeners) {
       connection._hasListeners = true;
@@ -223,6 +237,16 @@ export async function ensureVoiceConnectionReady(connection: any, channel: any, 
 
       connection.on('stateChange', (oldState: any, newState: any) => {
         debugLog(`[Voice Connection State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+        if (newState.status === VoiceConnectionStatus.Signalling && oldState.status === VoiceConnectionStatus.Ready) {
+          setTimeout(() => {
+            if (connection.state.status === VoiceConnectionStatus.Signalling) {
+              debugLog(`[Voice Connection] Primary connection stuck in signalling. Destroying aggressively.`);
+              try { connection.destroy(); } catch (e) {}
+              const player = guildPlayers.get(connectionKey);
+              if (player) { player.stop(true); }
+            }
+          }, 3000);
+        }
       });
 
       connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -283,6 +307,17 @@ export async function ensureVoiceConnectionReady(connection: any, channel: any, 
 
       newConnection.on('stateChange', (oldState: any, newState: any) => {
         debugLog(`[Voice Connection Retry State Change] Guild ${guildId}: ${oldState.status} -> ${newState.status}`);
+        // Aggressively destroy if stuck in signalling to force a fresh connection next time
+        if (newState.status === VoiceConnectionStatus.Signalling && oldState.status === VoiceConnectionStatus.Ready) {
+          setTimeout(() => {
+            if (newConnection.state.status === VoiceConnectionStatus.Signalling) {
+              debugLog(`[Voice Connection] Connection stuck in signalling. Destroying aggressively.`);
+              try { newConnection.destroy(); } catch (e) {}
+              const player = guildPlayers.get(connectionKey);
+              if (player) { player.stop(true); }
+            }
+          }, 3000);
+        }
       });
 
       try {
@@ -304,8 +339,11 @@ export async function ensureVoiceConnectionReady(connection: any, channel: any, 
   voiceReadyPromises.set(connectionKey, checkPromise);
 
   try {
-    const result = await checkPromise;
-    return result;
+    const isReady = await checkPromise;
+    if (isReady) {
+      return getOrCreateVoiceConnection(channel, group);
+    }
+    return null;
   } finally {
     voiceReadyPromises.delete(connectionKey);
   }
@@ -386,11 +424,15 @@ export function getOrCreateGuildPlayer(guildId: string, connection: any) {
       playNext(guildId, player, connection);
     });
 
-    player.on(AudioPlayerStatus.Idle, () => {
-      // Small delay helps Discord not cut off the end of speech abruptly
-      setTimeout(() => {
-        playNext(guildId, player, connection);
-      }, 500);
+    player.on('stateChange', (oldState: any, newState: any) => {
+      debugLog(`Persistent Player state for ${guildId}: ${oldState.status} -> ${newState.status}`);
+      if (newState.status === AudioPlayerStatus.Idle && oldState.status !== AudioPlayerStatus.Idle) {
+        // Small delay helps Discord not cut off the end of speech abruptly
+        setTimeout(() => {
+          guildIsPlaying.set(guildId, false);
+          playNext(guildId, player, connection);
+        }, 500);
+      }
     });
   }
   
@@ -471,9 +513,8 @@ async function playLocalFileInChannelForClient(
   group?: string,
   options?: { volume?: number, maxDurationSec?: number }
 ) {
-  const connection = getOrCreateVoiceConnection(channel, group);
-  const isReady = await ensureVoiceConnectionReady(connection, channel, group);
-  if (!isReady) {
+  const connection = await ensureVoiceConnectionReady(channel, group);
+  if (!connection) {
     return;
   }
 
@@ -508,7 +549,7 @@ async function playLocalFileInChannelForClient(
   });
   guildAudioQueues.set(connectionKey, queue);
 
-  lastAudioPlayTime = Date.now();
+  lastAudioPlayTime.set(connectionKey, Date.now());
   
   if (!guildIsPlaying.get(connectionKey)) {
     playNext(connectionKey, player, connection);
@@ -1211,9 +1252,8 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
         continue;
       }
 
-      const connection = getOrCreateVoiceConnection(channel, group);
-      const isReady = await ensureVoiceConnectionReady(connection, channel, group);
-      if (!isReady) {
+      const connection = await ensureVoiceConnectionReady(channel, group);
+      if (!connection) {
         continue;
       }
 
@@ -1233,7 +1273,7 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
       queue.push({ createResource });
       guildAudioQueues.set(connectionKey, queue);
       
-      lastAudioPlayTime = Date.now();
+      lastAudioPlayTime.set(connectionKey, Date.now());
       debugLog(`Play queued on persistent player for client group "${group || 'bot1'}" in channel: ${channel.name}`);
       
       if (!guildIsPlaying.get(connectionKey)) {
@@ -1452,7 +1492,8 @@ function startScheduleLoop(
       for (const [key, isPlay] of guildIsPlaying.entries()) {
          if (!key.endsWith("_bot2") && isPlay) hasActiveQueues1 = true;
       }
-      if (hasActiveQueues1 || (now - lastAudioPlayTime < 5 * 60 * 1000)) {
+      const recentAudio1 = Array.from(lastAudioPlayTime.entries()).some(([k, v]) => !k.endsWith('_bot2') && (now - v < 5 * 60 * 1000));
+      if (hasActiveQueues1 || recentAudio1) {
          shouldBeConnected1 = true;
       }
 
@@ -1461,8 +1502,7 @@ function startScheduleLoop(
              targetConnectionChannels1.forEach(channelId => {
                 client?.channels.fetch(channelId).then(async channel => {
                     if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
-                        const connection = getOrCreateVoiceConnection(channel);
-                        await ensureVoiceConnectionReady(connection, channel).catch(()=>{});
+                        await ensureVoiceConnectionReady(channel).catch(()=>{});
                     }
                 }).catch(()=>{});
              });
@@ -1511,8 +1551,7 @@ function startScheduleLoop(
              targetConnectionChannels2.forEach(channelId => {
                 client2?.channels.fetch(channelId).then(async channel => {
                     if (channel && (channel.type === ChannelType.GuildVoice || channel.type === ChannelType.GuildStageVoice || (typeof channel.isVoiceBased === 'function' && channel.isVoiceBased()))) {
-                        const connection = getOrCreateVoiceConnection(channel, "bot2");
-                        await ensureVoiceConnectionReady(connection, channel, "bot2").catch(()=>{});
+                        await ensureVoiceConnectionReady(channel, "bot2").catch(()=>{});
                     }
                 }).catch(()=>{});
              });
