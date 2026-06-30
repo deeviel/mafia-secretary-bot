@@ -43,6 +43,7 @@ export default function App() {
   const [warningAudioOffsetSec, setWarningAudioOffsetSec] = useState(30);
   const [warningAudioFileName, setWarningAudioFileName] = useState('godfather-theme-15s.mp3');
   const [warningAudioVolume, setWarningAudioVolume] = useState(100);
+  const [warningAudioEnabled, setWarningAudioEnabled] = useState(true);
   const [availableAudioFiles, setAvailableAudioFiles] = useState<string[]>(['godfather-theme-15s.mp3']);
   const [isUploading, setIsUploading] = useState(false);
   
@@ -202,6 +203,7 @@ export default function App() {
         if (typeof data.warningAudioOffsetSec === 'number') setWarningAudioOffsetSec(data.warningAudioOffsetSec);
         if (typeof data.warningAudioFileName === 'string') setWarningAudioFileName(data.warningAudioFileName);
         if (typeof data.warningAudioVolume === 'number') setWarningAudioVolume(data.warningAudioVolume);
+        if (typeof data.warningAudioEnabled === 'boolean') setWarningAudioEnabled(data.warningAudioEnabled);
         if (typeof data.bot2ChannelId === 'string') setBot2ChannelId(data.bot2ChannelId);
         if (typeof data.autoTransferAtStart === 'boolean') setAutoTransferAtStart(data.autoTransferAtStart);
         if (typeof data.autoTransferDelayMins === 'number') setAutoTransferDelayMins(data.autoTransferDelayMins);
@@ -281,7 +283,8 @@ export default function App() {
     newWarningVolume?: number,
     newBot2ChannelId?: string,
     newAutoTransferAtStart?: boolean,
-    newAutoTransferDelayMins?: number
+    newAutoTransferDelayMins?: number,
+    newWarningAudioEnabled?: boolean
   ) => {
     setWarnings(updatedWarnings);
     setVoiceCountdown(updatedVoiceCountdown);
@@ -290,6 +293,7 @@ export default function App() {
     if (newWarningOffset !== undefined) setWarningAudioOffsetSec(newWarningOffset);
     if (newWarningFile !== undefined) setWarningAudioFileName(newWarningFile);
     if (newWarningVolume !== undefined) setWarningAudioVolume(newWarningVolume);
+    if (newWarningAudioEnabled !== undefined) setWarningAudioEnabled(newWarningAudioEnabled);
     if (newBot2ChannelId !== undefined) setBot2ChannelId(newBot2ChannelId);
     if (newAutoTransferAtStart !== undefined) setAutoTransferAtStart(newAutoTransferAtStart);
     if (newAutoTransferDelayMins !== undefined) setAutoTransferDelayMins(newAutoTransferDelayMins);
@@ -308,6 +312,7 @@ export default function App() {
       warningAudioOffsetSec: newWarningOffset !== undefined ? newWarningOffset : warningAudioOffsetSec,
       warningAudioFileName: newWarningFile !== undefined ? newWarningFile : warningAudioFileName,
       warningAudioVolume: newWarningVolume !== undefined ? newWarningVolume : warningAudioVolume,
+      warningAudioEnabled: newWarningAudioEnabled !== undefined ? newWarningAudioEnabled : warningAudioEnabled,
       bot2ChannelId: bot2Ch,
       autoTransferAtStart: autoTrans,
       autoTransferDelayMins: autoTransDelay
@@ -732,7 +737,7 @@ export default function App() {
                               fetch('/api/discord/test', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ channelId: val, lang: lang })
+                                body: JSON.stringify({ channelId: val, lang: lang, botNum: 1 })
                               }).then(async res => {
                                 const data = await res.json();
                                 if (!res.ok) showToast("Failed: " + data.error, "error");
@@ -889,6 +894,38 @@ export default function App() {
                       ⚡ Force Transfer All Here
                     </button>
 
+                    {availableChannels.length > 0 && (
+                      <div className="flex flex-col gap-1.5 border-t border-slate-800/30 pt-2.5">
+                        <span className="text-[9px] font-mono text-cyan-500 uppercase tracking-wider font-semibold">Voice Test Trigger (Bot 2)</span>
+                        <select 
+                          className="bg-[#05060a] border border-slate-800 text-slate-300 text-[11px] rounded-xl px-2 py-1.5 outline-none cursor-pointer focus:border-cyan-500/50 transition-colors w-full font-mono"
+                          onChange={e => {
+                            const val = e.target.value;
+                            if (val) {
+                              const lang = voices.find(v => v.uri === selectedVoice)?.lang || 'en';
+                              fetch('/api/discord/test', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ channelId: val, lang: lang, botNum: 2 })
+                              }).then(async res => {
+                                const data = await res.json();
+                                if (!res.ok) showToast("Failed: " + data.error, "error");
+                                else showToast(data.message, "success");
+                              }).catch(err => {
+                                console.error(err);
+                                showToast("Test voice failed", "error");
+                              });
+                            }
+                          }}
+                        >
+                          <option value="">-- Choose Channel to Test Bot 2 --</option>
+                          {availableChannels.map(c => (
+                            <option key={c.id} value={c.id}>{c.guildName} — {c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
                     <button
                       type="button"
                       onClick={handleDiscordDisconnect2}
@@ -941,9 +978,36 @@ export default function App() {
                 </p>
               </div>
 
+              {/* Toggle Custom Warning Sound */}
+              <div className="flex items-center justify-between bg-[#07090F] p-3.5 rounded-2xl border border-slate-800/60">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[10px] text-slate-300 uppercase tracking-wider font-bold">Custom Warning Sound Intro</span>
+                  <span className="text-[9px] text-slate-500">Play custom soundtrack before the 10-second countdown</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVal = !warningAudioEnabled;
+                    setWarningAudioEnabled(nextVal);
+                    syncSettings(warnings, voiceCountdown, undefined, voiceStartText, warningAudioOffsetSec, warningAudioFileName, warningAudioVolume, undefined, undefined, undefined, nextVal);
+                    showToast(nextVal ? "Custom warning sound enabled" : "Custom warning sound disabled", "success");
+                  }}
+                  className={`w-11 h-6 rounded-full p-0.5 transition-colors duration-200 outline-none flex items-center ${
+                    warningAudioEnabled ? "bg-rose-600/90" : "bg-slate-800"
+                  }`}
+                >
+                  <div
+                    className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-200 ${
+                      warningAudioEnabled ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Feature 2: Warning Countdown Offset */}
-              <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold block mb-1.5">
+              <div className={`space-y-4 transition-all duration-300 ${warningAudioEnabled ? "opacity-100" : "opacity-40 pointer-events-none"}`}>
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-widest font-bold block mb-1.5">
                   Warning Audio Trigger Offset
                 </label>
                 <div className="flex gap-2 items-center">
@@ -1040,10 +1104,10 @@ export default function App() {
                   </div>
 
                   {/* Test Custom Warning Sound on Discord */}
-                  {isDiscordConnected && availableChannels.length > 0 && (
+                  {(isDiscordConnected || isDiscordConnected2) && availableChannels.length > 0 && (
                     <div className="mt-3 bg-[#07090F] p-3 rounded-2xl border border-rose-950/15 flex flex-col gap-2">
                       <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider block">Test warning volume on Discord</span>
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 items-center">
                         <select 
                           id="test-warning-channel-select"
                           className="bg-[#0c0f1a] border border-slate-800 text-slate-300 text-xs rounded-xl px-2.5 py-1.5 outline-none cursor-pointer focus:border-rose-500/40 transition-colors flex-1"
@@ -1054,36 +1118,74 @@ export default function App() {
                             <option key={c.id} value={c.id}>{c.name} ({c.guildName})</option>
                           ))}
                         </select>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const selectEl = document.getElementById('test-warning-channel-select') as HTMLSelectElement;
-                            const channelId = selectEl?.value;
-                            if (!channelId) {
-                              showToast("Please select a Discord voice channel first.", "error");
-                              return;
-                            }
-                            fetch('/api/discord/test-warning-sound', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({
-                                channelId,
-                                fileName: warningAudioFileName,
-                                volume: warningAudioVolume
-                              })
-                            }).then(async res => {
-                              const data = await res.json();
-                              if (!res.ok) showToast("Test sound failed: " + data.error, "error");
-                              else showToast("Playing custom warning sound on Discord...", "success");
-                            }).catch(err => {
-                              console.error(err);
-                              showToast("Failed to run test warning sound.", "error");
-                            });
-                          }}
-                          className="bg-rose-950/45 hover:bg-rose-950/70 border border-rose-900/40 text-rose-300 font-mono text-xs px-3 py-1.5 rounded-xl transition-all font-semibold active:scale-[0.98]"
-                        >
-                          🔊 Test Sound
-                        </button>
+                        <div className="flex gap-1.5">
+                          {isDiscordConnected && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const selectEl = document.getElementById('test-warning-channel-select') as HTMLSelectElement;
+                                const channelId = selectEl?.value;
+                                if (!channelId) {
+                                  showToast("Please select a Discord voice channel first.", "error");
+                                  return;
+                                }
+                                fetch('/api/discord/test-warning-sound', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    channelId,
+                                    fileName: warningAudioFileName,
+                                    volume: warningAudioVolume,
+                                    botNum: 1
+                                  })
+                                }).then(async res => {
+                                  const data = await res.json();
+                                  if (!res.ok) showToast("Test sound failed: " + data.error, "error");
+                                  else showToast("Playing custom warning sound via Bot 1...", "success");
+                                }).catch(err => {
+                                  console.error(err);
+                                  showToast("Failed to run test warning sound.", "error");
+                                });
+                              }}
+                              className="bg-rose-950/45 hover:bg-rose-950/70 border border-rose-900/40 text-rose-300 font-mono text-[10px] px-2.5 py-1.5 rounded-xl transition-all font-semibold active:scale-[0.98]"
+                            >
+                              🔊 Test Bot 1
+                            </button>
+                          )}
+                          {isDiscordConnected2 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const selectEl = document.getElementById('test-warning-channel-select') as HTMLSelectElement;
+                                const channelId = selectEl?.value;
+                                if (!channelId) {
+                                  showToast("Please select a Discord voice channel first.", "error");
+                                  return;
+                                }
+                                fetch('/api/discord/test-warning-sound', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    channelId,
+                                    fileName: warningAudioFileName,
+                                    volume: warningAudioVolume,
+                                    botNum: 2
+                                  })
+                                }).then(async res => {
+                                  const data = await res.json();
+                                  if (!res.ok) showToast("Test sound failed: " + data.error, "error");
+                                  else showToast("Playing custom warning sound via Bot 2...", "success");
+                                }).catch(err => {
+                                  console.error(err);
+                                  showToast("Failed to run test warning sound.", "error");
+                                });
+                              }}
+                              className="bg-cyan-950/45 hover:bg-cyan-950/70 border border-cyan-900/40 text-cyan-300 font-mono text-[10px] px-2.5 py-1.5 rounded-xl transition-all font-semibold active:scale-[0.98]"
+                            >
+                              🔊 Test Bot 2
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1121,6 +1223,7 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+              </div>
               </div>
             </div>
           </div>

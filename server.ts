@@ -44,6 +44,7 @@ export const globalSettings: any = {
   warningAudioOffsetSec: 30,
   warningAudioFileName: "godfather-theme-15s.mp3",
   warningAudioVolume: 100,
+  warningAudioEnabled: true,
   bot2ChannelId: "",
   autoTransferAtStart: false,
   autoTransferDelayMins: 0
@@ -134,6 +135,9 @@ async function startServer() {
     }
     if (typeof req.body.warningAudioVolume === 'number') {
       globalSettings.warningAudioVolume = req.body.warningAudioVolume;
+    }
+    if (typeof req.body.warningAudioEnabled === 'boolean') {
+      globalSettings.warningAudioEnabled = req.body.warningAudioEnabled;
     }
     if (typeof req.body.bot2ChannelId === 'string') {
       globalSettings.bot2ChannelId = req.body.bot2ChannelId;
@@ -292,11 +296,12 @@ async function startServer() {
   app.post("/api/discord/test", async (req, res) => {
     try {
       const { testVoice } = await import("./discordBot.js");
-      const { channelId, lang } = req.body;
+      const { channelId, lang, botNum } = req.body;
       if (!channelId) return res.status(400).json({ error: "Missing channelId" });
       
-      await testVoice(channelId, lang || 'en');
-      res.json({ success: true, message: "Test voice requested." });
+      const botNumber = (botNum === 2 || botNum === '2') ? 2 : 1;
+      await testVoice(channelId, lang || 'en', botNumber);
+      res.json({ success: true, message: `Test voice requested for Bot ${botNumber}.` });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: err.message, stack: err.stack });
@@ -306,13 +311,14 @@ async function startServer() {
   app.post("/api/discord/test-warning-sound", async (req, res) => {
     try {
       const { testWarningSound } = await import("./discordBot.js");
-      const { channelId, fileName, volume } = req.body;
+      const { channelId, fileName, volume, botNum } = req.body;
       if (!channelId) return res.status(400).json({ error: "Missing channelId" });
       if (!fileName) return res.status(400).json({ error: "Missing fileName" });
       
       const volNum = typeof volume === 'number' ? volume : 100;
-      await testWarningSound(channelId, fileName, volNum);
-      res.json({ success: true, message: `Test warning sound playing on Discord channel.` });
+      const botNumber = (botNum === 2 || botNum === '2') ? 2 : 1;
+      await testWarningSound(channelId, fileName, volNum, botNumber);
+      res.json({ success: true, message: `Test warning sound playing on Discord channel via Bot ${botNumber}.` });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: err.message, stack: err.stack });

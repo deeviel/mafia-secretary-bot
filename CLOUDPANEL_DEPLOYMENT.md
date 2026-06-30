@@ -58,11 +58,11 @@ DISCORD_TOKEN="<INSERT_YOUR_DISCORD_BOT_TOKEN_HERE>"
      If PM2 is not installed, run `npm install -g pm2` (or see the PM2 troubleshooting section below).
      Start your application for the first time by running:
      ```bash
-     npx pm2 start ecosystem.config.cjs
+     nice -n -10 npx pm2 start ecosystem.config.cjs
      ```
      To restart it in the future after making updates:
      ```bash
-     npx pm2 restart all
+     nice -n -10 npx pm2 restart ecosystem.config.cjs
      ```
      To make sure PM2 starts automatically on server reboot:
      ```bash
@@ -100,11 +100,11 @@ If you write code directly on the server or use Git:
    ```
    *(This builds all updated index files and compiles `server.ts` into `dist/server.cjs`)*.
 5. **Restart the server process** to load your changes:
-   - **Using PM2:**
+   - **Using PM2 (with high priority):**
      ```bash
-     pm2 restart ecosystem.config.cjs
+     nice -n -10 pm2 restart ecosystem.config.cjs
      ```
-     *(If pm2 commands require npx prefix, run: `npx pm2 restart ecosystem.config.cjs`)*.
+     *(If pm2 commands require npx prefix, run: `nice -n -10 npx pm2 restart ecosystem.config.cjs`)*.
    - **Using CloudPanel UI:** In your Node.js site settings panel, click **Restart App**.
 
 ---
@@ -119,9 +119,9 @@ If you prefer building and testing on your development machine before uploading 
 3. Log into CloudPanel, open the **File Manager**, and navigate to your site's root directory (`htdocs/secretary.mafia.anvorte.com/`).
 4. **Upload** and **extract** the updated zip, letting it replace the older files.
 5. **Restart the server process** to run the fresh bundle:
-   - **Using PM2:**
+   - **Using PM2 (with high priority):**
      ```bash
-     pm2 restart ecosystem.config.cjs
+     nice -n -10 pm2 restart ecosystem.config.cjs
      ```
    - **Using CloudPanel UI:** Open your Node.js Site configuration and click **Restart App**.
 

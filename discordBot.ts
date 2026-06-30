@@ -577,6 +577,7 @@ export interface DiscordBotSettings {
   warningAudioOffsetSec?: number;
   warningAudioFileName?: string;
   warningAudioVolume?: number;
+  warningAudioEnabled?: boolean;
   bot2ChannelId?: string;
   autoTransferAtStart?: boolean;
   autoTransferDelayMins?: number;
@@ -685,8 +686,15 @@ export async function initDiscordBot(
     throw new Error("Invalid token format.");
   }
 
+  if (scheduleInterval1) {
+    clearInterval(scheduleInterval1);
+    scheduleInterval1 = null;
+  }
   if (client) {
-    client.destroy();
+    try {
+      client.destroy();
+    } catch (e) {}
+    client = null;
   }
 
   const tryLoginWithIntents = (intentsList: any[]): Promise<void> => {
@@ -877,8 +885,15 @@ export async function initDiscordBot2(
     throw new Error("Invalid secondary token format.");
   }
 
+  if (scheduleInterval2) {
+    clearInterval(scheduleInterval2);
+    scheduleInterval2 = null;
+  }
   if (client2) {
-    client2.destroy();
+    try {
+      client2.destroy();
+    } catch (e) {}
+    client2 = null;
   }
 
   return new Promise((resolve, reject) => {
@@ -1063,21 +1078,32 @@ function applyPhonetics(text: string, lang: string): string {
   return mapped;
 }
 
-export async function testVoice(channelId: string, lang = 'en') {
-  console.log(`Running test voice on channel ${channelId} with lang ${lang}`);
-  await playAudioInVoiceChannels("This is a test message to verify the voice channel connection.", [channelId], lang, true);
+export async function testVoice(channelId: string, lang = 'en', botNum: 1 | 2 = 1) {
+  console.log(`Running test voice on channel ${channelId} with lang ${lang} for Bot ${botNum}`);
+  await playAudioInVoiceChannels(
+    `This is a test message to verify the voice channel connection for Bot ${botNum}.`,
+    [channelId],
+    lang,
+    true,
+    botNum === 2 ? 'bot2' : 'bot1'
+  );
 }
 
-export async function testWarningSound(channelId: string, fileName: string, volume: number) {
-  console.log(`Testing warning sound: ${fileName} on channel ${channelId} with volume ${volume}`);
+export async function testWarningSound(channelId: string, fileName: string, volume: number, botNum: 1 | 2 = 1) {
+  console.log(`Testing warning sound: ${fileName} on channel ${channelId} with volume ${volume} for Bot ${botNum}`);
   const targetPath = path.join(process.cwd(), fileName);
   if (!fs.existsSync(targetPath)) {
     throw new Error(`Warning sound file ${fileName} does not exist on the server.`);
   }
-  await playLocalFileInChannels(targetPath, [channelId], { volume, maxDurationSec: 15 });
+  await playLocalFileInChannels(
+    targetPath,
+    [channelId],
+    { volume, maxDurationSec: 15 },
+    botNum === 2 ? 'bot2' : 'bot1'
+  );
 }
 
-export async function playAudioInVoiceChannels(text: string, channelIds: string[], lang = 'en', disableAutoDetect = false) {
+export async function playAudioInVoiceChannels(text: string, channelIds: string[], lang = 'en', disableAutoDetect = false, allowedClient?: 'bot1' | 'bot2') {
   if (!channelIds || channelIds.length === 0) {
     // Fallback to process.env if none specified
     const fallbackId = process.env.DISCORD_VOICE_CHANNEL_ID;
@@ -1142,9 +1168,12 @@ export async function playAudioInVoiceChannels(text: string, channelIds: string[
       let selectedClient: Client | null = null;
       let group: string | undefined = undefined;
 
-      if (client && client.isReady()) {
+      if ((!allowedClient || allowedClient === 'bot1') && client && client.isReady()) {
         selectedClient = client;
         group = undefined;
+      } else if (allowedClient === 'bot2' && client2 && client2.isReady()) {
+        selectedClient = client2;
+        group = 'bot2';
       }
 
       if (!selectedClient) {
@@ -1492,9 +1521,12 @@ function startScheduleLoop(
       const milestoneKey = `warn-${warnMin}`;
       if (minsLeft === warnMin && !milestones.has(milestoneKey) && msLeft > 0) {
         milestones.add(milestoneKey);
-        // Play TTS only on Bot 1 (to prevent redundant voices/conflicts)
-        playAudioInVoiceChannels(`Reminder: ${nextEvent!.name} starts in ${warnMin} minute${warnMin > 1 ? 's' : ''}.`, targetChannels, globalSettings.voiceLang, true);
-        debugLog(`Spoke warning milestone: ${milestoneKey} for ${nextEvent!.name}`);
+        if (botNum === 1) {
+          playAudioInVoiceChannels(`Reminder: ${nextEvent!.name} starts in ${warnMin} minute${warnMin > 1 ? 's' : ''}.`, targetChannels, globalSettings.voiceLang, true, 'bot1');
+        } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+          playAudioInVoiceChannels(`Reminder: ${nextEvent!.name} starts in ${warnMin} minute${warnMin > 1 ? 's' : ''}.`, bot2TargetChannels, globalSettings.voiceLang, true, 'bot2');
+        }
+        debugLog(`Spoke warning milestone: ${milestoneKey} for ${nextEvent!.name} (botNum: ${botNum})`);
       }
     });
 
@@ -1505,27 +1537,31 @@ function startScheduleLoop(
         const milestoneKey = `warning-audio-${warningOffset}`;
         if (!milestones.has(milestoneKey)) {
           milestones.add(milestoneKey);
-          const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
-          const customAudioPath = path.join(process.cwd(), customFileName);
-          if (fs.existsSync(customAudioPath)) {
-            // Play custom warning audio on Bot 1 channels
-            playLocalFileInChannels(customAudioPath, targetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot1');
-            // Play custom warning audio on Bot 2 channels
-            if (bot2TargetChannels.length > 0) {
-              playLocalFileInChannels(customAudioPath, bot2TargetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot2');
-            }
-            debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name} with volume ${globalSettings.warningAudioVolume || 100}% playing for max 10s`);
-          } else {
-            const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
-            if (fs.existsSync(fallbackPath)) {
-              playLocalFileInChannels(fallbackPath, targetChannels, { volume: 100, maxDurationSec: 10 }, 'bot1');
-              if (bot2TargetChannels.length > 0) {
-                playLocalFileInChannels(fallbackPath, bot2TargetChannels, { volume: 100, maxDurationSec: 10 }, 'bot2');
+          if (globalSettings.warningAudioEnabled !== false) {
+            const customFileName = globalSettings.warningAudioFileName || 'godfather-theme-15s.mp3';
+            const customAudioPath = path.join(process.cwd(), customFileName);
+            if (fs.existsSync(customAudioPath)) {
+              if (botNum === 1) {
+                playLocalFileInChannels(customAudioPath, targetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot1');
+              } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+                playLocalFileInChannels(customAudioPath, bot2TargetChannels, { volume: globalSettings.warningAudioVolume || 100, maxDurationSec: 10 }, 'bot2');
               }
-              debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name}`);
+              debugLog(`Played custom audio "${customFileName}" milestone: ${milestoneKey} for ${nextEvent.name} with volume ${globalSettings.warningAudioVolume || 100}% (botNum: ${botNum})`);
             } else {
-              debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);
+              const fallbackPath = path.join(process.cwd(), 'godfather-theme-15s.mp3');
+              if (fs.existsSync(fallbackPath)) {
+                if (botNum === 1) {
+                  playLocalFileInChannels(fallbackPath, targetChannels, { volume: 100, maxDurationSec: 10 }, 'bot1');
+                } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+                  playLocalFileInChannels(fallbackPath, bot2TargetChannels, { volume: 100, maxDurationSec: 10 }, 'bot2');
+                }
+                debugLog(`Played fallback godfather audio milestone: ${milestoneKey} for ${nextEvent.name} (botNum: ${botNum})`);
+              } else {
+                debugLog(`No warning audio file found at ${customAudioPath} or ${fallbackPath}`);
+              }
             }
+          } else {
+            debugLog(`Custom warning audio is disabled. Skipping warning sound playback.`);
           }
         }
       } else if (secsLeft <= 10 && secsLeft >= 1) {
@@ -1534,17 +1570,19 @@ function startScheduleLoop(
           milestones.add(milestoneKey);
           const cachedFile = cachedSpeechPaths.get(secsLeft.toString());
           if (cachedFile && fs.existsSync(cachedFile)) {
-            // Play cached countdown MP3 on Bot 1
-            playLocalFileInChannels(cachedFile, targetChannels, undefined, 'bot1');
-            // Play cached countdown MP3 on Bot 2
-            if (bot2TargetChannels.length > 0) {
+            if (botNum === 1) {
+              playLocalFileInChannels(cachedFile, targetChannels, undefined, 'bot1');
+            } else if (botNum === 2 && bot2TargetChannels.length > 0) {
               playLocalFileInChannels(cachedFile, bot2TargetChannels, undefined, 'bot2');
             }
           } else {
-            // Fallback: TTS only on Bot 1
-            playAudioInVoiceChannels(secsLeft.toString(), targetChannels, globalSettings.voiceLang, true);
+            if (botNum === 1) {
+              playAudioInVoiceChannels(secsLeft.toString(), targetChannels, globalSettings.voiceLang, true, 'bot1');
+            } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+              playAudioInVoiceChannels(secsLeft.toString(), bot2TargetChannels, globalSettings.voiceLang, true, 'bot2');
+            }
           }
-          debugLog(`Spoke countdown milestone: ${milestoneKey} for ${nextEvent.name}`);
+          debugLog(`Spoke countdown milestone: ${milestoneKey} for ${nextEvent.name} (botNum: ${botNum})`);
         }
       } else if (secsLeft <= 0) {
         const milestoneKey = 'countdown-0';
@@ -1556,25 +1594,31 @@ function startScheduleLoop(
           const clearCommsFile = cachedSpeechPaths.get('clear-comms');
           
           if (isDefaultText && clearCommsFile && fs.existsSync(clearCommsFile)) {
-            // Play clear comms on Bot 1
-            playLocalFileInChannels(clearCommsFile, targetChannels, undefined, 'bot1');
-            // Play clear comms on Bot 2
-            if (bot2TargetChannels.length > 0) {
+            if (botNum === 1) {
+              playLocalFileInChannels(clearCommsFile, targetChannels, undefined, 'bot1');
+              setTimeout(() => {
+                playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, targetChannels, globalSettings.voiceLang, true, 'bot1');
+              }, 2600);
+            } else if (botNum === 2 && bot2TargetChannels.length > 0) {
               playLocalFileInChannels(clearCommsFile, bot2TargetChannels, undefined, 'bot2');
+              setTimeout(() => {
+                playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, bot2TargetChannels, globalSettings.voiceLang, true, 'bot2');
+              }, 2600);
             }
-            setTimeout(() => {
-              // TTS on Bot 1 only
-              playAudioInVoiceChannels(`${nextEvent!.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
-            }, 2600);
           } else {
-            // TTS on Bot 1 only
-            playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
+            if (botNum === 1) {
+              playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true, 'bot1');
+            } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+              playAudioInVoiceChannels(`${customStartText} ${nextEvent.name} is starting now.`, bot2TargetChannels, globalSettings.voiceLang, true, 'bot2');
+            }
           }
 
-          // Handle auto-transfer if enabled!
-          triggerAutoTransfer();
+          // Handle auto-transfer ONLY via Bot 1
+          if (botNum === 1) {
+            triggerAutoTransfer();
+          }
 
-          debugLog(`Spoke starting-now milestone: ${milestoneKey} for ${nextEvent.name}`);
+          debugLog(`Spoke starting-now milestone: ${milestoneKey} for ${nextEvent.name} (botNum: ${botNum})`);
         }
       }
     } else {
@@ -1582,13 +1626,13 @@ function startScheduleLoop(
         const milestoneKey = 'countdown-0';
         if (!milestones.has(milestoneKey)) {
           milestones.add(milestoneKey);
-          // Fallback: TTS on Bot 1 only
-          playAudioInVoiceChannels(`${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true);
-          
-          // Handle auto-transfer if enabled!
-          triggerAutoTransfer();
-          
-          debugLog(`Spoke starting-now milestone (no countdown): ${milestoneKey} for ${nextEvent.name}`);
+          if (botNum === 1) {
+            playAudioInVoiceChannels(`${nextEvent.name} is starting now.`, targetChannels, globalSettings.voiceLang, true, 'bot1');
+            triggerAutoTransfer();
+          } else if (botNum === 2 && bot2TargetChannels.length > 0) {
+            playAudioInVoiceChannels(`${nextEvent.name} is starting now.`, bot2TargetChannels, globalSettings.voiceLang, true, 'bot2');
+          }
+          debugLog(`Spoke starting-now milestone (no countdown): ${milestoneKey} for ${nextEvent.name} (botNum: ${botNum})`);
         }
       }
     }

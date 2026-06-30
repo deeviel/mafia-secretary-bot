@@ -6,10 +6,12 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: "500M",
+      max_memory_restart: "1G",
+      node_args: "--max-old-space-size=1024 --gc-interval=100",
       env: {
         NODE_ENV: "production",
-        PORT: 3000
+        PORT: 3000,
+        UV_THREADPOOL_SIZE: 16
       }
     }
   ]
